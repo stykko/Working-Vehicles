@@ -1,0 +1,107 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>WorkingVehicles</AssemblyName>
+    <RootNamespace>WorkingVehicles</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+
+    <!-- Game folder. If yours is different: dotnet build -c Release -p:GameDir="D:\Games\TheLongDark" -->
+    <GameDir Condition="'$(GameDir)'==''">C:\Program Files (x86)\Steam\steamapps\common\TheLongDark</GameDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- MelonLoader (net6) -->
+    <Reference Include="MelonLoader">
+      <HintPath>$(GameDir)\MelonLoader\net6\MelonLoader.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(GameDir)\MelonLoader\net6\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(GameDir)\MelonLoader\net6\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Common">
+      <HintPath>$(GameDir)\MelonLoader\net6\Il2CppInterop.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- Converted Unity assemblies (generated the first time the game is opened with MelonLoader) -->
+    <!-- Game code (classes PlayerInVehicle, VehicleDoor, GameManager, vp_FPSCamera...) -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Mod options page (the ModSettings mod must be in the Mods folder) -->
+    <Reference Include="ModSettings">
+      <HintPath>$(GameDir)\Mods\ModSettings.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Needed so the compiler resolves the item creation functions (GearItem) -->
+    <Reference Include="Unity.Addressables">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\Unity.Addressables.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Needed for the objects' unique identifier (GUID) -->
+    <Reference Include="Il2CppTLD.PDID">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\Il2CppTLD.PDID.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\Il2Cppmscorlib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\UnityEngine.AudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- To draw on screen and load images -->
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+  </ItemGroup>
+
+  <!-- After building, copies the .dll to the game's Mods folder (if it exists) -->
+  <Target Name="CopiarAMods" AfterTargets="Build" Condition="Exists('$(GameDir)\Mods')">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameDir)\Mods" />
+    <Message Importance="high" Text="WorkingVehicles.dll copiado a $(GameDir)\Mods" />
+  </Target>
+
+  <ItemGroup>
+    <!-- paint texture (made with the community TLD_Brush brush), bundled inside the mod -->
+    <EmbeddedResource Include="paint.png" LogicalName="WorkingVehicles.paint.png" />
+    <EmbeddedResource Include="dashboard_rpm.png" LogicalName="WorkingVehicles.dashboard_rpm.png" />
+    <EmbeddedResource Include="dashboard_fuel.png" LogicalName="WorkingVehicles.dashboard_fuel.png" />
+    <EmbeddedResource Include="dashboard_speed.png" LogicalName="WorkingVehicles.dashboard_speed.png" />
+  </ItemGroup>
+
+</Project>
