@@ -22,6 +22,7 @@ namespace WorkingVehicles
         public float batteryCondition = 1f;   // battery condition (0..1)
         public float[] parts;           // condition of each engine part (-1 = not there); null = no data
         public float fuel = 0.4f; // tank: 0..1
+        public bool stored;           // in the garage: the original vehicle stays hidden
     }
 
     /// <summary>Which vehicle the player was sitting in (for when the game is saved and quit while inside).</summary>
@@ -45,6 +46,7 @@ namespace WorkingVehicles
             list.Clear();
             loaded = false;
             Load();
+            Garage.Reload();
         }
 
         static readonly List<Data> list = new List<Data>();
@@ -61,10 +63,10 @@ namespace WorkingVehicles
             catch (Exception) { return "default"; }
         }
 
-        static float F(string s) { return float.Parse(s, CultureInfo.InvariantCulture); }
-        static string S(float f) { return f.ToString("R", CultureInfo.InvariantCulture); }
+        internal static float F(string s) { return float.Parse(s, CultureInfo.InvariantCulture); }
+        internal static string S(float f) { return f.ToString("R", CultureInfo.InvariantCulture); }
 
-        static float[] ReadParts(string t)
+        internal static float[] ReadParts(string t)
         {
             string[] q = t.Split(';');
             if (q.Length != Parts.Count) return null;
@@ -73,7 +75,7 @@ namespace WorkingVehicles
             return r;
         }
 
-        static string WriteParts(float[] c)
+        internal static string WriteParts(float[] c)
         {
             if (c == null || c.Length != Parts.Count) return "";
             var q = new string[c.Length];
@@ -91,7 +93,7 @@ namespace WorkingVehicles
                 foreach (string line in File.ReadAllLines(FilePath))
                 {
                     string[] p = line.Split('|');
-                    if (p.Length != 4 && p.Length != 5 && p.Length != 7 && p.Length != 9 && p.Length != 11 && p.Length != 12 && p.Length != 13) continue;
+                    if (p.Length != 4 && p.Length != 5 && p.Length != 7 && p.Length != 9 && p.Length != 11 && p.Length != 12 && p.Length != 13 && p.Length != 14) continue;
                     string[] o = p[1].Split(';'), q = p[2].Split(';'), r = p[3].Split(';');
                     if (o.Length != 3 || q.Length != 3 || r.Length != 4) continue;
                     list.Add(new Data
@@ -108,7 +110,8 @@ namespace WorkingVehicles
                         battery = p.Length >= 11 && p[9] == "1",
                         batteryCondition = p.Length >= 11 ? Mathf.Clamp01(F(p[10])) : 1f,
                         parts = p.Length >= 12 ? ReadParts(p[11]) : null,
-                        fuel = p.Length == 13 ? Mathf.Clamp01(F(p[12])) : 0.4f
+                        fuel = p.Length >= 13 ? Mathf.Clamp01(F(p[12])) : 0.4f,
+                        stored = p.Length == 14 && p[13] == "1"
                     });
                 }
             }
@@ -128,7 +131,7 @@ namespace WorkingVehicles
             Load();
             Data ex = Find(slot, d.orig);
             if (ex == null) { ex = new Data { slot = slot, orig = d.orig }; list.Add(ex); }
-            ex.pos = d.pos; ex.rot = d.rot; ex.snowRemoved = d.snowRemoved; ex.steering = d.steering; ex.isRunning = d.isRunning; ex.level = d.level; ex.hour = d.hour; ex.battery = d.battery; ex.batteryCondition = d.batteryCondition; ex.parts = d.parts; ex.fuel = d.fuel;
+            ex.pos = d.pos; ex.rot = d.rot; ex.snowRemoved = d.snowRemoved; ex.steering = d.steering; ex.isRunning = d.isRunning; ex.level = d.level; ex.hour = d.hour; ex.battery = d.battery; ex.batteryCondition = d.batteryCondition; ex.parts = d.parts; ex.fuel = d.fuel; ex.stored = d.stored;
         }
 
         /// <summary>Writes what is in memory to the file. It is only called when the game saves:
@@ -143,9 +146,10 @@ namespace WorkingVehicles
                     l.Add(e.slot + "|" + S(e.orig.x) + ";" + S(e.orig.y) + ";" + S(e.orig.z)
                           + "|" + S(e.pos.x) + ";" + S(e.pos.y) + ";" + S(e.pos.z)
                           + "|" + S(e.rot.x) + ";" + S(e.rot.y) + ";" + S(e.rot.z) + ";" + S(e.rot.w)
-                          + "|" + (e.level < 0.5f ? "1" : "0") + "|" + S(e.steering) + "|" + (e.isRunning ? "1" : "0") + "|" + S(e.level) + "|" + S(e.hour) + "|" + (e.battery ? "1" : "0") + "|" + S(e.batteryCondition) + "|" + WriteParts(e.parts) + "|" + S(e.fuel));
+                          + "|" + (e.level < 0.5f ? "1" : "0") + "|" + S(e.steering) + "|" + (e.isRunning ? "1" : "0") + "|" + S(e.level) + "|" + S(e.hour) + "|" + (e.battery ? "1" : "0") + "|" + S(e.batteryCondition) + "|" + WriteParts(e.parts) + "|" + S(e.fuel) + "|" + (e.stored ? "1" : "0"));
                 Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
                 File.WriteAllLines(FilePath, l.ToArray());
+                Garage.Confirm();
             }
             catch (Exception e) { MelonLoader.MelonLogger.Warning("Could not save the vehicle state: " + e.Message); }
         }

@@ -52,6 +52,11 @@
       <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\Il2CppTLD.PDID.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Needed for the liquid volume type (jerry cans) -->
+    <Reference Include="Il2CppTLD.IntBackedUnit">
+      <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\Il2CppTLD.IntBackedUnit.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Il2Cppmscorlib">
       <HintPath>$(GameDir)\MelonLoader\Il2CppAssemblies\Il2Cppmscorlib.dll</HintPath>
       <Private>false</Private>
@@ -87,8 +92,6 @@
     </Reference>
   </ItemGroup>
 
-  <ItemGroup>
-  </ItemGroup>
 
   <!-- After building, copies the .dll to the game's Mods folder (if it exists) -->
   <Target Name="CopiarAMods" AfterTargets="Build" Condition="Exists('$(GameDir)\Mods')">
@@ -102,6 +105,12 @@
     <EmbeddedResource Include="dashboard_rpm.png" LogicalName="WorkingVehicles.dashboard_rpm.png" />
     <EmbeddedResource Include="dashboard_fuel.png" LogicalName="WorkingVehicles.dashboard_fuel.png" />
     <EmbeddedResource Include="dashboard_speed.png" LogicalName="WorkingVehicles.dashboard_speed.png" />
+    <!-- translations of the Mod Options texts -->
+    <EmbeddedResource Include="localization.json" LogicalName="WorkingVehicles.localization.json" />
+    <!-- engine screen art: part icons, painted panel frame, rough strip for bars and buttons -->
+    <EmbeddedResource Include="ui_icons.png" LogicalName="WorkingVehicles.ui_icons.png" />
+    <EmbeddedResource Include="ui_frame.png" LogicalName="WorkingVehicles.ui_frame.png" />
+    <EmbeddedResource Include="ui_paint.png" LogicalName="WorkingVehicles.ui_paint.png" />
   </ItemGroup>
 
 </Project>

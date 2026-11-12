@@ -1,6 +1,6 @@
 namespace WorkingVehicles
 {
-    /// <summary>Mod texts in Spanish / English ("Idioma / Language" option in Mod Options).</summary>
+    /// <summary>Mod texts in Spanish / English. Follows the game's language (Spanish game = Spanish, anything else = English).</summary>
     internal static class L
     {
         public static bool En { get { return Settings.English(); } }

@@ -16,7 +16,7 @@ namespace WorkingVehicles
     /// </summary>
     internal class Dashboard
     {
-        public const int Rpm = 0, Fuel = 1, Vel = 2, Lights = 3, Ac = 4;
+        public const int Rpm = 0, Fuel = 1, Vel = 2, Lights = 3, Ac = 4, Trunk = 5;
         static readonly string[] nameList =
         {
             "indicador IZQUIERDO (RPM, el grande)", "indicador del MEDIO (combustible, el chico)", "indicador DERECHO (velocímetro, el grande)",
@@ -35,9 +35,9 @@ namespace WorkingVehicles
         GameObject group;
         readonly Frame[] frames = new Frame[5];
         readonly Transform[] needles = new Transform[3];
-        readonly Renderer[] levers = new Renderer[2];
-        readonly Transform[] leverT = new Transform[2];
-        readonly Renderer[] leds = new Renderer[2];
+        readonly Renderer[] levers = new Renderer[3];
+        readonly Transform[] leverT = new Transform[3];
+        readonly Renderer[] leds = new Renderer[3];
         readonly List<Light> headlights = new List<Light>();
         readonly List<Light> rear = new List<Light>();
         // the game's original lights (the same ones that turn on with the aurora)
@@ -48,7 +48,7 @@ namespace WorkingVehicles
         float checkLights = -1f;
         bool childrenManual;
 
-        public bool lights, ac;
+        public bool lights, ac, trunkOpen;
         public bool inAdjust;
         int step;
         readonly Frame[] fresh = new Frame[5];
@@ -73,11 +73,11 @@ namespace WorkingVehicles
 
         // ------------------------------------------------------------------ creation
 
-        public static Dashboard Create(Transform root, Vector3 fwdLocal, Vector3 eyeWorld)
+        public static Dashboard Create(Transform root, Vector3 fwdLocal, Vector3 eyeWorld, bool car = false)
         {
             try
             {
-                var t = new Dashboard { root = root, fwdL = fwdLocal.sqrMagnitude > 0.001f ? fwdLocal.normalized : Vector3.forward };
+                var t = new Dashboard { root = root, car = car, fwdL = fwdLocal.sqrMagnitude > 0.001f ? fwdLocal.normalized : Vector3.forward };
                 t.Prepare(root.InverseTransformPoint(eyeWorld));
                 return t;
             }
@@ -175,6 +175,17 @@ namespace WorkingVehicles
             return exists;
         }
 
+        /// <summary>Buttons: lights, A/C and the trunk (cars: unlock; pickup: tailgate), placed right below the lights button.</summary>
+        int Buttons { get { return car && !Settings.CarTrunkButton() ? 2 : 3; } }
+
+        Frame BtnFrame(int j, float k)
+        {
+            if (j < 2) return frames[3 + j];
+            Frame f = frames[3];
+            f.p = f.p - UpOf(f.n, fwdL) * 0.062f * k;
+            return f;
+        }
+
         // Initial positions: rays are cast from the driver's eyes toward where each gauge / button is in the normal view,
         // and the ray finds the dashboard's real surface (distance and tilt).
         void Values(Vector3 eyeL)
@@ -201,7 +212,19 @@ namespace WorkingVehicles
         }
 
         // ---- already adjusted positions (they ship with the mod: nobody has to calibrate anything)
-        static readonly string[] lockedSet =
+        public bool car;          // car: own adjustment file and own fixed positions
+
+        // Fixed positions for CARS (tuned in game, from WorkingVehicles_dashboard_car.txt). Same format as the truck set.
+        static readonly string[] lockedSetCar =
+        {
+            "0|-0.5737466;1.2500631;1.1483138|-1.3345952E-07;-0.0023747745;-0.9999972",
+            "1|-0.47225;1.2454014;1.1424682|-1.3345952E-07;-0.0023747745;-0.9999972",
+            "2|-0.3626445;1.2472494;1.147333|-1.3345952E-07;-0.0023747745;-0.9999972",
+            "3|-0.03830439;1.2117085;1.0586061|0.023979045;-0.025487674;-0.99938756",
+            "4|0.024502099;1.2169034;1.0586624|0.023984458;-0.025505256;-0.9993869"
+        };
+
+        static readonly string[] lockedSetTruck =
         {
             "0|-0.58223164;1.459719;1.0756372|-9.933013E-07;-0.0023766332;-0.9999972",
             "1|-0.47383898;1.4523416;1.069798|-9.933013E-07;-0.0023766332;-0.9999972",
@@ -214,6 +237,8 @@ namespace WorkingVehicles
         {
             try
             {
+                string[] lockedSet = car ? lockedSetCar : lockedSetTruck;
+                if (lockedSet.Length < 5) return false;
                 foreach (string l in lockedSet)
                 {
                     string[] p = l.Split('|');
@@ -227,7 +252,7 @@ namespace WorkingVehicles
         }
 
         // ---- adjustment file
-        static string FilePath() { return Cfg.DataFile("WorkingVehicles_dashboard.txt", "CamionetaConducible_tablero.txt"); }
+        string FilePath() { return car ? Cfg.DataFile("WorkingVehicles_dashboard_car.txt", "WorkingVehicles_dashboard_car.txt") : Cfg.DataFile("WorkingVehicles_dashboard.txt", "CamionetaConducible_tablero.txt"); }
 
         bool Load()
         {
@@ -474,7 +499,7 @@ namespace WorkingVehicles
             if (group != null) UnityEngine.Object.Destroy(group);
             group = new GameObject("WV_Dashboard");
             group.transform.SetParent(root, false);
-            float k = Settings.SizeDashboard();
+            float k = Settings.SizeDashboard(car);
 
             // gauges: 0 = RPM (large), 1 = fuel (small), 2 = speedometer (large)
             float[] diam = { 0.088f, 0.050f, 0.088f };
@@ -498,9 +523,9 @@ namespace WorkingVehicles
             }
 
             // buttons: 3 = lights, 4 = air conditioning
-            for (int j = 0; j < 2; j++)
+            for (int j = 0; j < Buttons; j++)
             {
-                Frame m = frames[3 + j];
+                Frame m = BtnFrame(j, k);
                 var frameT = new GameObject("Boton" + j).transform;
                 frameT.SetParent(group.transform, false);
                 frameT.localPosition = m.p + m.n * 0.003f;
@@ -727,9 +752,9 @@ namespace WorkingVehicles
 
         void RefreshButtons()
         {
-            bool[] on = { lights, ac };
-            Color[] cOn = { new Color(0.25f, 1f, 0.3f), new Color(1f, 0.55f, 0.1f) };
-            for (int j = 0; j < 2; j++)
+            bool[] on = { lights, ac, trunkOpen };
+            Color[] cOn = { new Color(0.25f, 1f, 0.3f), new Color(1f, 0.55f, 0.1f), new Color(0.35f, 0.65f, 1f) };
+            for (int j = 0; j < 3; j++)
             {
                 if (leds[j] != null) leds[j].sharedMaterial = on[j] ? MatGloss(cOn[j]) : Hood.Mat(new Color(0.08f, 0.08f, 0.08f));
                 if (leverT[j] != null) leverT[j].localRotation = Quaternion.Euler(on[j] ? 11f : -11f, 0f, 0f);
@@ -743,6 +768,15 @@ namespace WorkingVehicles
             lights = !lights;
             ApplyLights(); RefreshButtons(); Click();
             return lights ? L.T("Luces encendidas", "Lights on") : L.T("Luces apagadas", "Lights off");
+        }
+
+        public string ToggleTrunk()
+        {
+            Click();
+            string r = WorkingVehicles.Trunk.Toggle(root, car);
+            trunkOpen = WorkingVehicles.Trunk.IsOpen(root, car);
+            RefreshButtons();
+            return r;
         }
 
         public string ToggleAc(bool broken)
@@ -915,10 +949,10 @@ namespace WorkingVehicles
             Vector3 o = cam.transform.position, f = cam.transform.forward;
             float best = 999f;
             int hit = -1;
-            float k = Settings.SizeDashboard();
-            for (int j = 0; j < 2; j++)
+            float k = Settings.SizeDashboard(car);
+            for (int j = 0; j < Buttons; j++)
             {
-                Vector3 p = root.TransformPoint(frames[3 + j].p);
+                Vector3 p = root.TransformPoint(BtnFrame(j, k).p);
                 Vector3 d = p - o;
                 float dist = d.magnitude;
                 if (dist < 0.05f || dist > 1.9f) continue;
@@ -929,6 +963,7 @@ namespace WorkingVehicles
             SetHover(hit < 0 ? -1 : 3 + hit);
             if (hit < 0) return null;
             which = 3 + hit;
+            if (hit == 2) return "[Click] " + (car ? L.T("Desbloquear el maletero", "Unlock the trunk") : (trunkOpen ? L.T("Cerrar la compuerta trasera", "Close the tailgate") : L.T("Abrir la compuerta trasera", "Open the tailgate")));
             return hit == 0 ? "[Click] " + (lights ? L.T("Apagar las luces", "Turn lights off") : L.T("Encender las luces", "Turn lights on")) : "[Click] " + (ac ? L.T("Apagar el aire acondicionado", "Turn AC off") : L.T("Encender el aire acondicionado", "Turn AC on"));
         }
 
@@ -985,7 +1020,7 @@ namespace WorkingVehicles
                     Save();
                     inAdjust = false;
                     Build();
-                    MelonLoader.MelonLogger.Msg("[Dashboard] positions saved in UserData\\WorkingVehicles_dashboard.txt");
+                    MelonLoader.MelonLogger.Msg("[Dashboard] positions saved in UserData\\" + (car ? "WorkingVehicles_dashboard_car.txt" : "WorkingVehicles_dashboard.txt"));
                     return "Tablero ajustado y guardado";
                 }
             }

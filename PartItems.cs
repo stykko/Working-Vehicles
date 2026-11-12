@@ -24,8 +24,8 @@ namespace WorkingVehicles
         public static bool Blocked { get { return failures >= 2; } }
         static string slotLoaded;
         static readonly Dictionary<string, int> registry = new Dictionary<string, int>();   // GUID -> part type
-        static readonly Mesh[] meshes = new Mesh[Parts.Count];
-        static readonly Il2CppReferenceArray<Material>[] mats = new Il2CppReferenceArray<Material>[Parts.Count];
+        static readonly Mesh[,] meshes = new Mesh[Parts.Count, 4];            // by type and wear level (see Hood.LevelOf)
+        static readonly Il2CppReferenceArray<Material>[,] mats = new Il2CppReferenceArray<Material>[Parts.Count, 4];
         static float sweepT;
 
         static string FilePath { get { return Cfg.DataFile("WorkingVehicles_partitems.txt", "CamionetaConducible_piezasitem.txt", 0); } }
@@ -33,13 +33,49 @@ namespace WorkingVehicles
         /// <summary>Are inventory items used? (option on and no failures creating them)</summary>
         public static bool Active { get { return Settings.PartsInventory(); } }
 
+        /// <summary>Reads an identifier by reflection from an object, trying several member names (the API changed in game 2.58).</summary>
+        static string ReadId(object o, params string[] names)
+        {
+            if (o == null) return "";
+            const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+            foreach (string n in names)
+            {
+                try
+                {
+                    for (Type t = o.GetType(); t != null; t = t.BaseType)
+                    {
+                        System.Reflection.MethodInfo m = t.GetMethod(n, F | System.Reflection.BindingFlags.DeclaredOnly, null, Type.EmptyTypes, null);
+                        object v = null;
+                        if (m != null) v = m.Invoke(o, null);
+                        else
+                        {
+                            System.Reflection.PropertyInfo pi = t.GetProperty(n, F | System.Reflection.BindingFlags.DeclaredOnly);
+                            if (pi != null && pi.GetIndexParameters().Length == 0) v = pi.GetValue(o, null);
+                            else
+                            {
+                                System.Reflection.FieldInfo fi = t.GetField(n, F | System.Reflection.BindingFlags.DeclaredOnly);
+                                if (fi != null) v = fi.GetValue(o);
+                            }
+                        }
+                        if (v != null)
+                        {
+                            string str = v.ToString();
+                            if (!string.IsNullOrEmpty(str) && str != "0" && !str.StartsWith("0000000000")) return str;
+                        }
+                    }
+                }
+                catch (Exception) { }
+            }
+            return "";
+        }
+
         /// <summary>Asks the game to give the item a unique identifier (trying several ways) and returns it.</summary>
         static string CreateGuid(GearItem g)
         {
             string id = Guid(g);
             if (!string.IsNullOrEmpty(id)) return id;
             GameObject go = g.gameObject;
-            try { g.ForceGUIDSetup(); } catch (Exception e) { MelonLoader.MelonLogger.Msg("[Piezas] ForceGUIDSetup: " + e.Message); }
+            try { g.ForceGUIDSetup(); } catch (Exception e) { MelonLoader.MelonLogger.Msg("[Parts] ForceGUIDSetup: " + e.Message); }
             id = Guid(g);
             if (!string.IsNullOrEmpty(id)) return id;
             try
@@ -48,19 +84,25 @@ namespace WorkingVehicles
                 if (og == null) { ObjectGuid.MaybeAttachObjectGuidAndRegister(go, go.name); og = ObjectGuid.GetObjectGuidFromGO(go); }
                 if (og != null)
                 {
-                    try { og.MaybeRuntimeRegister(); } catch (Exception e) { MelonLoader.MelonLogger.Msg("[Piezas] MaybeRuntimeRegister: " + e.Message); }
-                    try { id = og.Get(); } catch (Exception) { }
+                    try { og.MaybeRuntimeRegister(); } catch (Exception e) { MelonLoader.MelonLogger.Msg("[Parts] MaybeRuntimeRegister: " + e.Message); }
+                    // Get() and m_Guid were removed in game 2.58: they are looked up by reflection
+                    id = ReadId(og, "Get", "m_Guid", "m_RuntimeCachedPdid", "GetPdid", "Pdid", "m_Pdid");
                 }
             }
-            catch (Exception e) { MelonLoader.MelonLogger.Msg("[Piezas] ObjectGuid: " + e.Message); }
+            catch (Exception e) { MelonLoader.MelonLogger.Msg("[Parts] ObjectGuid: " + e.Message); }
             if (string.IsNullOrEmpty(id)) id = Guid(g);
+            if (string.IsNullOrEmpty(id)) id = ReadId(g, "m_RuntimeCachedPdid", "GetPdid", "Pdid", "m_Pdid", "m_Guid");
             return id ?? "";
         }
 
         static string Guid(GearItem g)
         {
-            try { return g != null ? ObjectGuid.GetGuidFromGameObject(g.gameObject) : ""; }
-            catch (Exception) { return ""; }
+            if (g == null) return "";
+            string id = "";
+            try { id = ObjectGuid.GetGuidFromGameObject(g.gameObject); }
+            catch (Exception) { }
+            if (string.IsNullOrEmpty(id)) id = ReadId(g, "m_RuntimeCachedPdid", "GetPdid", "Pdid", "m_Pdid");
+            return id ?? "";
         }
 
         // ------------------------------------------------------------------ per-game registry
@@ -353,13 +395,14 @@ namespace WorkingVehicles
         /// <summary>Creates the part as an inventory item. false if it couldn't be done (then the old pack is used).</summary>
         public static bool Give(int type, float condition)
         {
+            GearItem g = null;
+            GearItem installed = null;
             try
             {
                 if (!Active) return false;
                 Ensure(Persistence.Slot());
                 PlayerManager pm = GameManager.GetPlayerManagerComponent();
                 if (pm == null) return false;
-                GearItem g = null;
                 string used = null;
                 for (int k = 0; k < pool.Length && g == null; k++)
                 {
@@ -375,7 +418,7 @@ namespace WorkingVehicles
                 }
                 Rename(g, type);
                 try { g.SetNormalizedHP(Mathf.Clamp01(condition), false); } catch (Exception) { }
-                GearItem installed = pm.AddItemToPlayerInventory(g, false, true);
+                installed = pm.AddItemToPlayerInventory(g, false, true);
                 if (installed == null) installed = g;
                 string guid = CreateGuid(installed);
                 if (string.IsNullOrEmpty(guid))
@@ -396,14 +439,21 @@ namespace WorkingVehicles
                 MelonLoader.MelonLogger.Msg("[Parts] " + Parts.Names[type] + " created on '" + used + "' (id " + guid + ")");
                 return true;
             }
-            catch (Exception e) { MelonLoader.MelonLogger.Warning("[Parts] could not create the part: " + e.Message); return false; }
+            catch (Exception e)
+            {
+                MelonLoader.MelonLogger.Warning("[Parts] could not create the part: " + e.Message);
+                // do not leave an unregistered copy in the inventory (it was duplicating endlessly)
+                try { GearItem x = installed ?? g; if (x != null) GameManager.GetInventoryComponent().DestroyGear(x); } catch (Exception) { }
+                failures++;
+                return false;
+            }
         }
 
         static readonly Dictionary<string, Mesh> locals = new Dictionary<string, Mesh>();
         static readonly int[] notices = new int[Parts.Count];
 
         /// <summary>The part's mesh expressed in the space of each of the item's MeshFilters (so it doesn't end up small/rotated if the base item has its own scale or rotation).</summary>
-        static Mesh MeshFor(int type, MeshFilter mf, GearItem g)
+        static Mesh MeshFor(int type, int level, MeshFilter mf, GearItem g)
         {
             // the base item can have its own scale (hammer 0.27, knife 1.2...): it is compensated so the part comes out at its real size
             float rs = g.transform.lossyScale.x;
@@ -413,12 +463,12 @@ namespace WorkingVehicles
             float f = Settings.SizeParts() / rs * insp;
             Matrix4x4 rel = mf.transform.worldToLocalMatrix * g.transform.localToWorldMatrix;
             if (rel.GetColumn(0).magnitude < 1e-6f || rel.GetColumn(1).magnitude < 1e-6f || rel.GetColumn(2).magnitude < 1e-6f) return null;
-            string cacheKey = type + "|" + Mathf.Round(f * 1000f).ToString(CultureInfo.InvariantCulture) + "|";
+            string cacheKey = type + "L" + level + "|" + Mathf.Round(f * 1000f).ToString(CultureInfo.InvariantCulture) + "|";
             for (int i = 0; i < 16; i++) cacheKey += Mathf.Round(rel[i] * 1000f).ToString(CultureInfo.InvariantCulture) + ",";
             Mesh m;
             if (locals.TryGetValue(cacheKey, out m) && m != null) return m;
             if (locals.Count > 300) locals.Clear();
-            Mesh src = meshes[type];
+            Mesh src = meshes[type, level];
             m = new Mesh();
             m.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
             Vector3[] v = src.vertices;
@@ -462,15 +512,16 @@ namespace WorkingVehicles
             Repair.Prepare(g, type);
             try
             {
-                if (meshes[type] != null && Near(g)) return;      // the model is not touched while inspecting
-                if (meshes[type] == null)
+                int level = Hood.LevelOf(Mathf.Clamp01(g.GetNormalizedCondition()));
+                if (meshes[type, level] != null && Near(g)) return;      // the model is not touched while inspecting
+                if (meshes[type, level] == null)
                 {
                     Mesh m; Material[] ms;
-                    Hood.BuildMesh(type, out m, out ms);
+                    Hood.BuildMesh(type, level, out m, out ms);
                     var arr = new Il2CppReferenceArray<Material>(ms.Length);
                     for (int i = 0; i < ms.Length; i++) arr[i] = ms[i];
-                    meshes[type] = m;
-                    mats[type] = arr;
+                    meshes[type, level] = m;
+                    mats[type, level] = arr;
                 }
                 var filters = g.GetComponentsInChildren<MeshFilter>(true);
                 if (filters.Length == 0) Notice("'" + g.gameObject.name + "' has no MeshFilter (another kind of model?): renderers = " + g.GetComponentsInChildren<Renderer>(true).Length);
@@ -480,13 +531,13 @@ namespace WorkingVehicles
                     if (mr == null) { Notice("'" + mf.name + "' has no MeshRenderer"); continue; }
                     // only the models of THIS item (not those of another item hanging from it)
                     if (OfOtherObject(mf.transform, g.transform)) { Notice("model of '" + mf.name + "' ignored: it hangs from another object"); continue; }
-                    Mesh fresh = MeshFor(type, mf, g);
+                    Mesh fresh = MeshFor(type, level, mf, g);
                     if (fresh == null) { Notice("could not compute the mesh for " + g.gameObject.name + "' (object scale " + V3(g.transform.lossyScale) + ")"); continue; }
                     live[g.gameObject.GetInstanceID()] = g;
                     types[g.gameObject.GetInstanceID()] = type;
                     if (mf.sharedMesh != null && mf.sharedMesh.Pointer == fresh.Pointer) continue;
                     mf.sharedMesh = fresh;
-                    mr.sharedMaterials = mats[type];
+                    mr.sharedMaterials = mats[type, level];
                     if (notices[type] < 3)
                     {
                         notices[type]++;
@@ -598,8 +649,9 @@ namespace WorkingVehicles
         {
             FitExamine();
             if (live.Count == 0) return;
-            var list = new List<KeyValuePair<int, GearItem>>(live);
-            foreach (KeyValuePair<int, GearItem> kv in list)
+            fastList.Clear();
+            foreach (KeyValuePair<int, GearItem> kv0 in live) fastList.Add(kv0);       // reused list: nothing is allocated every frame
+            foreach (KeyValuePair<int, GearItem> kv in fastList)
             {
                 try
                 {
@@ -619,6 +671,7 @@ namespace WorkingVehicles
             }
         }
 
+        static readonly List<KeyValuePair<int, GearItem>> fastList = new List<KeyValuePair<int, GearItem>>();
         static int lastCount = -1;
 
         /// <summary>Every so often it looks for the parts (in the inventory and in the world) and puts the model on them, because the game doesn't save those changes.</summary>
@@ -627,7 +680,7 @@ namespace WorkingVehicles
             Fast();
             sweepT -= dt;
             if (sweepT > 0f) return;
-            sweepT = 1.5f;
+            sweepT = 3f * Settings.ScanScale();   // scans every item of the game: the heaviest thing the mod does
             try
             {
                 if (!Active) return;

@@ -89,9 +89,32 @@ namespace WorkingVehicles
             return r;
         }
 
+        static MethodInfo prefabLoader;
+        static bool prefabLookedUp;
+        static readonly Dictionary<string, GearItem> prefabCache = new Dictionary<string, GearItem>();
+
         static GearItem Prefab(string n)
         {
-            try { return GearItem.LoadGearItemPrefab(n); }
+            // LoadGearItemPrefab was removed in game 2.58: it is looked up by reflection, with InstantiateGearItem as fallback
+            try
+            {
+                if (prefabLoader == null && !prefabLookedUp)
+                {
+                    prefabLookedUp = true;
+                    prefabLoader = typeof(GearItem).GetMethod("LoadGearItemPrefab", BindingFlags.Public | BindingFlags.Static, null, new Type[] { typeof(string) }, null);
+                }
+                if (prefabLoader != null) return prefabLoader.Invoke(null, new object[] { n }) as GearItem;
+                GearItem cached;
+                if (prefabCache.TryGetValue(n, out cached) && cached != null) return cached;
+                GearItem inst = GearItem.InstantiateGearItem(n);
+                if (inst == null) return null;
+                // the game matches the required materials by object name: without "(Clone)" it is the real item's name
+                inst.gameObject.name = n;
+                inst.gameObject.SetActive(false);
+                UnityEngine.Object.DontDestroyOnLoad(inst.gameObject);
+                prefabCache[n] = inst;
+                return inst;
+            }
             catch (Exception) { return null; }
         }
 
@@ -225,7 +248,7 @@ namespace WorkingVehicles
                     }
                 }
                 if (mat[m] == null) missing++;
-                if (Cfg.Report) MelonLoader.MelonLogger.Msg("[Repair] " + label[m] + ": " + (matName[m] ?? "NOT FOUND"));
+                MelonLoader.MelonLogger.Msg("[Repair] " + label[m] + ": " + (matName[m] ?? "NOT FOUND") + (mat[m] != null ? " (object '" + mat[m].gameObject.name + "')" : ""));
             }
             foreach (string t in toolNames)
             {
@@ -295,6 +318,9 @@ namespace WorkingVehicles
                     if (ix >= 0) { count[ix] = Mathf.Max(count[ix], r[1]); continue; }
                     objs.Add(p); count.Add(r[1]); nameList.Add(n);
                 }
+                // the game's materials table (2.58+) throws IndexOutOfRange with 3 or more materials and leaves the panel half drawn: two at most
+                const int MaxMaterials = 2;
+                while (objs.Count > MaxMaterials) { objs.RemoveAt(objs.Count - 1); count.RemoveAt(count.Count - 1); nameList.RemoveAt(nameList.Count - 1); }
                 var arr = new Il2CppReferenceArray<GearItem>(objs.Count);
                 var un = new int[count.Count];
                 for (int i = 0; i < objs.Count; i++) { arr[i] = objs[i]; un[i] = count[i]; }

@@ -12,6 +12,7 @@ namespace WorkingVehicles
     internal class Hood
     {
         public Transform root;
+        public bool car;                   // car: uses the car engine height / size
         Transform hinge;
         Renderer[] partsHood;
         readonly List<GameObject> engineOriginal = new List<GameObject>();
@@ -19,6 +20,7 @@ namespace WorkingVehicles
         readonly Transform[] pz = new Transform[Parts.Count];
         Vector3 posLocal;                  // position of the engine group (in truck space)
         Quaternion rotClosedRel;          // closed rotation of the hinge relative to the truck
+        float lastH = float.NaN, lastK = float.NaN;
         public bool opened;               // the hood is open (the game itself opens it when you hold the click)
         const float AngleOpen = 15f;   // from how many degrees it counts as open
 
@@ -30,11 +32,11 @@ namespace WorkingVehicles
 
         // ------------------------------------------------------------------ creation
 
-        public static Hood Create(Transform root, Vector3 frontWorld)
+        public static Hood Create(Transform root, Vector3 frontWorld, bool car = false)
         {
             try
             {
-                var c = new Hood { root = root };
+                var c = new Hood { root = root, car = car };
                 return c.Assemble(frontWorld) ? c : null;
             }
             catch (Exception e)
@@ -115,6 +117,23 @@ namespace WorkingVehicles
 
         // ------------------------------------------------------------------ state
 
+        const float ShowDistance = 30f;
+        static int camFrame = -1;
+        static Vector3 camPos;
+        static bool camOk;
+
+        static bool Near(Vector3 p)
+        {
+            if (camFrame != Time.frameCount)
+            {
+                camFrame = Time.frameCount;
+                Camera c = Il2Cpp.GameManager.GetMainCamera();
+                camOk = c != null;
+                if (camOk) camPos = c.transform.position;
+            }
+            return !camOk || (p - camPos).sqrMagnitude < ShowDistance * ShowDistance;
+        }
+
         /// <summary>Every frame: checks whether the game opened the hood and, if so, shows the engine (and hides the original).</summary>
         public void Update()
         {
@@ -122,16 +141,24 @@ namespace WorkingVehicles
             Quaternion rel = Quaternion.Inverse(root.rotation) * hinge.rotation;
             opened = Quaternion.Angle(rel, rotClosedRel) > AngleOpen;
 
-            if (group.activeSelf != opened)
+            // The engine model (hundreds of pieces) is only shown while you are near: with many open hoods around the map it made the game lag.
+            bool show = opened && Near(root.position);
+            if (group.activeSelf != show)
             {
-                group.SetActive(opened);
-                foreach (GameObject g in engineOriginal) if (g != null) g.SetActive(!opened);
+                group.SetActive(show);
+                foreach (GameObject g in engineOriginal) if (g != null) g.SetActive(!show);
             }
-            if (opened)
+            if (show)
             {
                 // Fine adjustments from Mod Options (engine height and size)
-                group.transform.localPosition = posLocal + new Vector3(0f, Settings.HeightEngine(), 0f);
-                float k = Settings.SizeEngine();
+                float hEng = Settings.HeightEngine(car);
+                group.transform.localPosition = posLocal + new Vector3(0f, hEng, 0f);
+                float k = Settings.SizeEngine(car);
+                if (Settings.Debug() && (hEng != lastH || k != lastK))
+                {
+                    lastH = hEng; lastK = k;
+                    MelonLoader.MelonLogger.Msg("[Hood] '" + root.name + "' (" + (car ? "car" : "truck") + "): engine height " + hEng.ToString("F3") + ", size " + k.ToString("F3"));
+                }
                 group.transform.localScale = new Vector3(k, k, k);
             }
         }
@@ -143,7 +170,7 @@ namespace WorkingVehicles
 
         public Vector3 PointEngine()
         {
-            return root.TransformPoint(posLocal + new Vector3(0f, 0.25f + Settings.HeightEngine(), 0f));
+            return root.TransformPoint(posLocal + new Vector3(0f, 0.25f + Settings.HeightEngine(car), 0f));
         }
 
         /// <summary>Shows only what is installed. 'cond' &lt; 0 = the part is not there.</summary>
@@ -156,6 +183,161 @@ namespace WorkingVehicles
             if (boresGO != null) boresGO.SetActive(condition[Parts.Gasket] < 0f);
             if (studsGO != null) studsGO.SetActive(condition[Parts.Head] < 0f);
             if (rockersGO != null) rockersGO.SetActive(condition[Parts.Head] >= 0f && condition[Parts.Cap] < 0f);
+            for (int i = 0; i < Parts.Count; i++)
+                if (condition[i] >= 0f) Wear(i, condition[i]);
+        }
+
+        // ------------------------------------------------------------------ visible wear
+
+        static int ageLevel;                                            // used while a part is being built: ages the colors of its materials
+        static readonly float[] LevelCond = { 1f, 0.75f, 0.45f, 0.18f };
+
+        /// <summary>How worn a part looks: 0 new (85 % or more), 1 used, 2 worn, 3 ruined.</summary>
+        public static int LevelOf(float cond) { return cond >= 0.85f ? 0 : cond >= 0.60f ? 1 : cond >= 0.35f ? 2 : 3; }
+
+        // A new part is clean and slightly bright; as it wears, metal darkens and rusts, rubber and plastic dry out and turn dusty grey.
+        static Color Aged(Color b, float cond)
+        {
+            float w = 1f - Mathf.Clamp01(cond);                            // 0 new .. 1 dead
+            float k = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01((w - 0.05f) / 0.80f));
+            float lum = 0.3f * b.r + 0.59f * b.g + 0.11f * b.b;
+            Color target = lum < 0.13f
+                ? new Color(Mathf.Min(1f, b.r + 0.16f), Mathf.Min(1f, b.g + 0.15f), Mathf.Min(1f, b.b + 0.14f))                          // dried rubber / plastic
+                : Color.Lerp(b * 0.45f, new Color(0.40f, 0.20f, 0.08f), 0.75f);                                                          // dirty, rusty metal
+            Color c = Color.Lerp(b * (cond > 0.9f ? 1.08f : 1f), target, k * 0.92f);
+            c.a = b.a;
+            return c;
+        }
+
+        class Tinted { public Renderer r; public Color baseColor; }
+        readonly List<Tinted>[] tinted = new List<Tinted>[Parts.Count];
+        readonly float[] shownCond = { -5f, -5f, -5f, -5f, -5f, -5f };
+        readonly int[] shownLevel = { -1, -1, -1, -1, -1, -1 };
+        readonly GameObject[] wearGroup = new GameObject[Parts.Count];
+        static MaterialPropertyBlock propBlock;
+
+        // Color through a property block (the shared materials of the engine are not touched) plus the oil / rust marks of the level.
+        void Wear(int i, float cond)
+        {
+            try
+            {
+                if (pz[i] == null) return;
+                if (tinted[i] == null)
+                {
+                    tinted[i] = new List<Tinted>();
+                    foreach (Renderer r in pz[i].GetComponentsInChildren<Renderer>(true))
+                    {
+                        Material m = r.sharedMaterial;
+                        if (m == null) continue;
+                        tinted[i].Add(new Tinted { r = r, baseColor = m.color });
+                    }
+                }
+                if (Mathf.Abs(shownCond[i] - cond) >= 0.01f)
+                {
+                    shownCond[i] = cond;
+                    if (propBlock == null) propBlock = new MaterialPropertyBlock();
+                    foreach (Tinted t in tinted[i])
+                    {
+                        if (t.r == null) continue;
+                        Color c = Aged(t.baseColor, cond);
+                        t.r.GetPropertyBlock(propBlock);
+                        propBlock.SetColor("_Color", c);
+                        t.r.SetPropertyBlock(propBlock);
+                    }
+                }
+                int lv = LevelOf(cond);
+                if (lv != shownLevel[i])
+                {
+                    shownLevel[i] = lv;
+                    if (wearGroup[i] != null) UnityEngine.Object.Destroy(wearGroup[i]);
+                    wearGroup[i] = lv > 0 ? Weather(pz[i], i, lv) : null;
+                }
+            }
+            catch (Exception e)
+            {
+                if (!wearFailed) { wearFailed = true; MelonLoader.MelonLogger.Warning("[Hood] visible wear unavailable: " + e.Message); }
+            }
+        }
+        static bool wearFailed;
+
+        struct Spot { public Vector3 p, n; public float size; }
+
+        /// <summary>Oil stains, rust patches and drips glued to the part's own surfaces (flat discs lying on faces that look up, thin streaks on the sides).
+        /// The more worn the part, the more of them. The marks are always the same for the same part and level.</summary>
+        static GameObject Weather(Transform root, int type, int level)
+        {
+            int saved = ageLevel;
+            ageLevel = 0;
+            var grp = new GameObject("WV_Wear");
+            grp.transform.SetParent(root, false);
+            try
+            {
+                var tops = new List<Spot>();
+                var sides = new List<Spot>();
+                var rnd = new System.Random(type * 7919 + level * 104729 + 17);
+                foreach (MeshFilter mf in root.GetComponentsInChildren<MeshFilter>(true))
+                {
+                    if (mf.sharedMesh == null || mf.transform.IsChildOf(grp.transform)) continue;
+                    Mesh me = mf.sharedMesh;
+                    Vector3[] v; int[] tr;
+                    try { v = me.vertices; tr = me.triangles; }
+                    catch (Exception) { continue; }                      // a mesh that cannot be read is skipped
+                    if (v == null || tr == null) continue;
+                    Matrix4x4 m = root.worldToLocalMatrix * mf.transform.localToWorldMatrix;
+                    int nt = tr.Length / 3;
+                    int step = Mathf.Max(1, nt / 2500);
+                    for (int ti = rnd.Next(step); ti < nt; ti += step)
+                    {
+                        Vector3 a = m.MultiplyPoint3x4(v[tr[ti * 3]]), b = m.MultiplyPoint3x4(v[tr[ti * 3 + 1]]), c = m.MultiplyPoint3x4(v[tr[ti * 3 + 2]]);
+                        Vector3 cr = Vector3.Cross(b - a, c - a);
+                        float area = cr.magnitude * 0.5f;
+                        if (area < 0.00012f) continue;
+                        Vector3 n = cr.normalized;
+                        var sp = new Spot { p = (a + b + c) / 3f, n = n, size = Mathf.Clamp(Mathf.Sqrt(area) * 0.9f, 0.012f, 0.050f) };
+                        if (n.y > 0.7f) tops.Add(sp);
+                        else if (Mathf.Abs(n.y) < 0.3f) sides.Add(sp);
+                    }
+                }
+                int oil = level == 1 ? 2 : level == 2 ? 4 : 7;
+                int rust = level == 1 ? 1 : level == 2 ? 5 : 9;
+                int drips = level == 1 ? 0 : level == 2 ? 2 : 5;
+                Color oilC = new Color(0.035f, 0.030f, 0.025f);
+                for (int i = 0; i < oil && tops.Count > 0; i++)
+                {
+                    Spot sp = tops[rnd.Next(tops.Count)];
+                    Disc(grp.transform, sp, sp.size * (0.8f + (float)rnd.NextDouble() * 0.5f), 0.0009f, oilC);
+                    if (level >= 2) Disc(grp.transform, new Spot { p = sp.p + new Vector3((float)rnd.NextDouble() - 0.5f, 0f, (float)rnd.NextDouble() - 0.5f) * sp.size * 0.8f, n = sp.n, size = sp.size }, sp.size * 0.45f, 0.0011f, oilC);
+                }
+                for (int i = 0; i < rust && (tops.Count + sides.Count) > 0; i++)
+                {
+                    List<Spot> src = (sides.Count > 0 && (tops.Count == 0 || rnd.Next(3) == 0)) ? sides : tops;
+                    Spot sp = src[rnd.Next(src.Count)];
+                    float d = sp.size * (0.6f + (float)rnd.NextDouble() * 0.6f);
+                    Disc(grp.transform, sp, d, 0.0010f, new Color(0.27f, 0.12f, 0.05f));
+                    Disc(grp.transform, sp, d * 0.70f, 0.0013f, new Color(0.45f, 0.21f, 0.08f));
+                    Disc(grp.transform, sp, d * 0.32f, 0.0016f, new Color(0.58f, 0.30f, 0.11f));
+                }
+                for (int i = 0; i < drips && sides.Count > 0; i++)
+                {
+                    Spot sp = sides[rnd.Next(sides.Count)];
+                    float len = 0.035f + (float)rnd.NextDouble() * 0.05f;
+                    GameObject st = Shape(grp.transform, PrimitiveType.Cube, "Goteo", sp.p + sp.n * 0.0012f + new Vector3(0f, -len * 0.5f, 0f), new Vector3(0.005f, len, 0.0016f), oilC);
+                    st.transform.localRotation = Quaternion.FromToRotation(Vector3.forward, sp.n);
+                }
+            }
+            catch (Exception e)
+            {
+                MelonLoader.MelonLogger.Warning("[Hood] wear marks of part " + type + ": " + e.Message);
+            }
+            finally { ageLevel = saved; }
+            return grp;
+        }
+
+        // flat disc lying on a surface, slightly sunk into it so it cannot float
+        static void Disc(Transform parent, Spot sp, float diameter, float thickness, Color c)
+        {
+            GameObject o = Shape(parent, PrimitiveType.Cylinder, "Mancha", sp.p + sp.n * (thickness * 0.5f), new Vector3(diameter, thickness * 0.5f, diameter), c);
+            o.transform.localRotation = Quaternion.FromToRotation(Vector3.up, sp.n);
         }
 
         // ------------------------------------------------------------------ colors
@@ -191,6 +373,7 @@ namespace WorkingVehicles
             Locked(g);
             Details(g);
             MoreDetails(g);
+            ExtraDetails(g);
             Firewall(g);
             for (int i = 0; i < Parts.Count; i++)
             {
@@ -345,6 +528,72 @@ namespace WorkingVehicles
             Cyl(g, "Bobina", new Vector3(0.03f, 0.58f, -0.40f), 0.05f, 0.10f, 'y', new Color(0.05f, 0.05f, 0.06f));
             Cyl(g, "TorreBobina", new Vector3(0.03f, 0.64f, -0.40f), 0.022f, 0.025f, 'y', new Color(0.10f, 0.10f, 0.11f));
             RCube(g, "SoporteBobina", new Vector3(0.03f, 0.53f, -0.40f), new Vector3(0.07f, 0.014f, 0.07f), iron);
+        }
+
+        // ---- more engine bay: A/C compressor and lines, catalytic converter with oxygen sensor, strut towers, brake lines
+        static void ExtraDetails(Transform g)
+        {
+            float kx0 = KX;
+            Color connector = new Color(0.07f, 0.07f, 0.08f);
+            Color steel = new Color(0.28f, 0.28f, 0.30f);
+            try
+            {
+                KX = WidthCore;
+                // A/C compressor (low, in front of the engine, right): body with fins, rear head, grooved pulley, clutch plate and ports
+                Vector3 ac = new Vector3(0.17f, 0.15f, 0.40f);
+                Cyl(g, "CompresorAC", ac, 0.12f, 0.14f, 'z', aluminum);
+                for (int i = 0; i < 6; i++)
+                    Cyl(g, "AletaCompresor", new Vector3(ac.x, ac.y, ac.z - 0.055f + i * 0.022f), 0.130f, 0.006f, 'z', alum);
+                Cyl(g, "CabezaCompresor", new Vector3(ac.x, ac.y, ac.z - 0.082f), 0.105f, 0.026f, 'z', iron);
+                Rev(g, "PoleaCompresor", Profile(0f, 0f, 0.062f, 0f, 0.062f, 0.008f, 0.054f, 0.010f, 0.062f, 0.012f, 0.062f, 0.024f, 0.054f, 0.026f, 0.062f, 0.028f, 0.062f, 0.036f, 0f, 0.036f), 28, new Vector3(ac.x, ac.y, ac.z + 0.07f), 'z', black);
+                Rev(g, "PlacaEmbragueAC", Profile(0f, 0f, 0.046f, 0f, 0.046f, 0.008f, 0f, 0.008f), 24, new Vector3(ac.x, ac.y, ac.z + 0.106f), 'z', new Color(0.16f, 0.16f, 0.17f));
+                Stud(g, "TornilloCompresor", new Vector3(ac.x, ac.y, ac.z + 0.12f), 0.014f, 0.014f, 'z', silver);
+                Cyl(g, "PuertoCompresorA", new Vector3(ac.x - 0.03f, ac.y + 0.070f, ac.z - 0.060f), 0.032f, 0.040f, 'y', silver);
+                Cyl(g, "PuertoCompresorB", new Vector3(ac.x + 0.03f, ac.y + 0.070f, ac.z - 0.060f), 0.026f, 0.040f, 'y', silver);
+                RCube(g, "FichaCompresor", new Vector3(ac.x + 0.060f, ac.y + 0.040f, ac.z - 0.030f), new Vector3(0.026f, 0.030f, 0.036f), connector);
+                RCube(g, "PataCompresor", new Vector3(ac.x, ac.y - 0.070f, ac.z - 0.01f), new Vector3(0.10f, 0.020f, 0.09f), block);
+                // receiver-drier and the two aluminum lines
+                Cyl(g, "SecadorAC", new Vector3(0.47f, 0.24f, 0.56f), 0.055f, 0.18f, 'y', silver);
+                Cyl(g, "TapaSecador", new Vector3(0.47f, 0.335f, 0.56f), 0.040f, 0.014f, 'y', black);
+                Cyl(g, "BridaSecador", new Vector3(0.47f, 0.145f, 0.56f), 0.062f, 0.010f, 'y', aluminum);
+                TubeO(g, "LineaACAlta", new[] { new Vector3(0.17f, 0.22f, 0.34f), new Vector3(0.30f, 0.12f, 0.45f), new Vector3(0.42f, 0.11f, 0.52f), new Vector3(0.47f, 0.14f, 0.56f) }, 0.009f, aluminum);
+                TubeO(g, "LineaACBaja", new[] { new Vector3(0.47f, 0.34f, 0.56f), new Vector3(0.47f, 0.28f, 0.50f), new Vector3(0.64f, 0.24f, 0.36f), new Vector3(0.66f, 0.26f, 0.0f), new Vector3(0.60f, 0.32f, -0.40f), new Vector3(0.58f, 0.45f, -0.69f) }, 0.007f, aluminum);
+                for (int i = 0; i < 4; i++)
+                    Cyl(g, "AbrazaderaLineaAC", new Vector3(0.65f - i * 0.0f, 0.255f, 0.20f - i * 0.17f), 0.020f, 0.012f, 'y', black);
+
+                // catalytic converter with flanges and the oxygen sensor on the exhaust pipe
+                Cyl(g, "Catalizador", new Vector3(0.35f, 0.105f, -0.43f), 0.115f, 0.30f, 'z', steel);
+                Cyl(g, "CatalizadorBorde", new Vector3(0.35f, 0.105f, -0.28f), 0.100f, 0.014f, 'z', iron);
+                Cyl(g, "CatalizadorBorde", new Vector3(0.35f, 0.105f, -0.58f), 0.100f, 0.014f, 'z', iron);
+                for (int i = 0; i < 3; i++)
+                    Cyl(g, "AroCatalizador", new Vector3(0.35f, 0.105f, -0.50f + i * 0.07f), 0.120f, 0.008f, 'z', new Color(0.20f, 0.20f, 0.21f));
+                Stud(g, "SondaO2Tuerca", new Vector3(0.342f, 0.250f, -0.17f), 0.026f, 0.014f, 'y', silver);
+                Cyl(g, "SondaO2", new Vector3(0.342f, 0.285f, -0.17f), 0.020f, 0.050f, 'y', silver);
+                TubeO(g, "CableSondaO2", new[] { new Vector3(0.342f, 0.31f, -0.17f), new Vector3(0.30f, 0.40f, -0.20f), new Vector3(0.16f, 0.46f, -0.32f), new Vector3(0.12f, 0.50f, -0.40f) }, 0.004f, rubber);
+                RCube(g, "FichaSondaO2", new Vector3(0.12f, 0.50f, -0.41f), new Vector3(0.024f, 0.020f, 0.030f), connector);
+
+                // brake lines from the master cylinder
+                TubeO(g, "FrenoLinea1", new[] { new Vector3(-0.33f, 0.50f, -0.53f), new Vector3(-0.48f, 0.47f, -0.50f), new Vector3(-0.60f, 0.40f, -0.35f), new Vector3(-0.66f, 0.26f, -0.20f) }, 0.004f, silver);
+                TubeO(g, "FrenoLinea2", new[] { new Vector3(-0.27f, 0.50f, -0.54f), new Vector3(-0.10f, 0.46f, -0.60f), new Vector3(0.05f, 0.40f, -0.67f) }, 0.004f, silver);
+                Cyl(g, "UnionFreno", new Vector3(-0.48f, 0.47f, -0.50f), 0.014f, 0.020f, 'x', copper);
+
+                // strut towers (the car's inner fenders), with plate and three nuts
+                KX = 1f;
+                foreach (float sx in new[] { -1f, 1f })
+                {
+                    Vector3 tw = new Vector3(sx * 0.72f, 0.50f, sx < 0f ? 0.16f : -0.05f);
+                    Cyl(g, "TorreAmortiguador", tw, 0.15f, 0.30f, 'y', new Color(0.08f, 0.08f, 0.09f));
+                    Cyl(g, "PlacaTorre", new Vector3(tw.x, 0.655f, tw.z), 0.17f, 0.014f, 'y', new Color(0.12f, 0.12f, 0.13f));
+                    Cyl(g, "VastagoTorre", new Vector3(tw.x, 0.680f, tw.z), 0.026f, 0.040f, 'y', silver);
+                    for (int i = 0; i < 3; i++)
+                    {
+                        float an = i * Mathf.PI * 2f / 3f + (sx < 0f ? 0.4f : 1.2f);
+                        Stud(g, "TuercaTorre", new Vector3(tw.x + Mathf.Cos(an) * 0.055f, 0.669f, tw.z + Mathf.Sin(an) * 0.055f), 0.020f, 0.012f, 'y', silver);
+                    }
+                    RCube(g, "RefuerzoTorre", new Vector3(sx * 0.77f, 0.30f, tw.z), new Vector3(0.05f, 0.30f, 0.12f), new Color(0.08f, 0.08f, 0.09f));
+                }
+            }
+            finally { KX = kx0; }
         }
 
         // ---- firewall (the back of the engine bay, which would otherwise show the cabin), gearbox and accessories
@@ -622,10 +871,10 @@ namespace WorkingVehicles
         //      five studs with cap nuts on the axis and the oil filler cap
         static void Cap(Transform t)
         {
-            Color c = new Color(0.90f, 0.12f, 0.09f);
-            Color c2 = new Color(0.74f, 0.09f, 0.07f);
-            Color c3 = new Color(0.96f, 0.30f, 0.22f);       // lighter relief (letters and edges)
-            // rubber gasket, base with a lip and body with slightly sloped sides
+            Color c = new Color(0.60f, 0.09f, 0.07f);
+            Color c2 = new Color(0.48f, 0.07f, 0.06f);
+            Color c3 = new Color(0.70f, 0.19f, 0.14f);       // lighter relief (edges)
+            // rubber gasket, flange, and the body with a stepped plateau
             RCube(t, "JuntaTapa", new Vector3(0f, 0.543f, 0f), new Vector3(0.330f, 0.008f, 0.580f), rubber);
             RCube(t, "BridaTapa", new Vector3(0f, 0.556f, 0f), new Vector3(0.336f, 0.018f, 0.588f), c2);
             RCube(t, "CuerpoTapa", new Vector3(0f, 0.590f, 0f), new Vector3(0.300f, 0.056f, 0.560f), c);
@@ -643,29 +892,36 @@ namespace WorkingVehicles
                 RCube(t, "NervioLateral", new Vector3(0.148f, 0.590f, z), new Vector3(0.008f, 0.046f, 0.014f), c2);
                 RCube(t, "NervioLateral", new Vector3(-0.148f, 0.590f, z), new Vector3(0.008f, 0.046f, 0.014f), c2);
             }
-            // five studs on the axis, with sealing washer, nut and cap nut
-            foreach (float zz in new[] { -0.220f, -0.110f, 0f, 0.110f, 0.220f })
+            // fixing bolts around the flange (as on a real cover: none on the top), with the head resting on the flange (top at 0.565)
+            for (int i = 0; i < 8; i++)
             {
-                Cyl(t, "Esparrago", new Vector3(0f, 0.660f, zz), 0.012f, 0.050f, 'y', silver);
-                Stud(t, "ArandelaEsparrago", new Vector3(0f, 0.6445f, zz), 0.036f, 0.004f, 'y', silver);
-                Stud(t, "TuercaEsparrago", new Vector3(0f, 0.652f, zz), 0.026f, 0.014f, 'y', silver);
-                Rev(t, "TuercaCiega", Profile(0f, 0f, 0.013f, 0f, 0.013f, 0.010f, 0.010f, 0.018f, 0.004f, 0.023f, 0f, 0.024f), 18, new Vector3(0f, 0.660f, zz), 'y', silver);
+                float z = -0.255f + i * (0.51f / 7f);
+                foreach (float sx in new[] { -1f, 1f })
+                {
+                    Stud(t, "ArandelaPernoTapa", new Vector3(sx * 0.1585f, 0.5665f, z), 0.021f, 0.003f, 'y', silver);
+                    Stud(t, "PernoTapa", new Vector3(sx * 0.1585f, 0.5710f, z), 0.015f, 0.006f, 'y', silver);
+                }
             }
-            // oil filler cap with ribbed grip, to one side of the studs
-            Vector3 po = new Vector3(0.070f, 0.0f, 0.165f);
-            Rev(t, "CuelloAceite", Profile(0f, 0f, 0.046f, 0f, 0.046f, 0.006f, 0.038f, 0.010f, 0.038f, 0.018f, 0f, 0.018f), 28, new Vector3(po.x, 0.6445f, po.z), 'y', black);
-            Rev(t, "TaponAceite", Profile(0f, 0f, 0.036f, 0f, 0.036f, 0.004f, 0.033f, 0.006f, 0.033f, 0.016f, 0.027f, 0.020f, 0f, 0.020f), 28, new Vector3(po.x, 0.660f, po.z), 'y', new Color(0.07f, 0.07f, 0.08f));
-            for (int i = 0; i < 12; i++)
+            foreach (float sz in new[] { -1f, 1f })
             {
-                float a = i * Mathf.PI * 2f / 12f;
-                GameObject e = RCube(t, "EstriaTapon", new Vector3(po.x + Mathf.Cos(a) * 0.033f, 0.670f, po.z + Mathf.Sin(a) * 0.033f), new Vector3(0.006f, 0.014f, 0.006f), new Color(0.12f, 0.12f, 0.13f));
+                Stud(t, "ArandelaPernoTapa", new Vector3(0f, 0.5665f, sz * 0.2865f), 0.021f, 0.003f, 'y', silver);
+                Stud(t, "PernoTapa", new Vector3(0f, 0.5710f, sz * 0.2865f), 0.015f, 0.006f, 'y', silver);
+            }
+            // oil filler: a molded neck on the plateau and the black plastic cap screwed onto it, ONE solid piece resting on the plateau
+            float py = 0.642f;
+            Vector3 po = new Vector3(0f, py, 0.165f);
+            Rev(t, "TaponAceite", Profile(0f, 0f, 0.048f, 0f, 0.048f, 0.005f, 0.042f, 0.009f, 0.042f, 0.013f, 0.039f, 0.015f, 0.039f, 0.029f, 0.034f, 0.034f, 0f, 0.034f), 32, po, 'y', new Color(0.07f, 0.07f, 0.08f));
+            for (int i = 0; i < 14; i++)
+            {
+                float a = i * Mathf.PI * 2f / 14f;
+                GameObject e = RCube(t, "EstriaTapon", new Vector3(po.x + Mathf.Cos(a) * 0.0405f, py + 0.0225f, po.z + Mathf.Sin(a) * 0.0405f), new Vector3(0.005f, 0.012f, 0.005f), new Color(0.11f, 0.11f, 0.12f));
                 e.transform.localRotation = Quaternion.Euler(0f, -a * Mathf.Rad2Deg, 0f);
             }
-            RCube(t, "ManijaTapon", new Vector3(po.x, 0.682f, po.z), new Vector3(0.048f, 0.008f, 0.012f), new Color(0.12f, 0.12f, 0.13f));
+            RCube(t, "MarcaTapon", new Vector3(po.x, py + 0.0345f, po.z), new Vector3(0.046f, 0.003f, 0.009f), new Color(0.13f, 0.13f, 0.14f));
             // breather (PCV) with a hose to the intake
-            Rev(t, "BocaRespiradero", Profile(0f, 0f, 0.020f, 0f, 0.020f, 0.012f, 0.014f, 0.016f, 0.014f, 0.030f, 0f, 0.030f), 20, new Vector3(0f, 0.6445f, -0.160f), 'y', c2);
-            TubeO(t, "MangueraRespiradero", new[] { new Vector3(0f, 0.676f, -0.160f), new Vector3(-0.05f, 0.700f, -0.190f), new Vector3(-0.14f, 0.690f, -0.200f), new Vector3(-0.23f, 0.675f, -0.200f) }, 0.012f, rubber);
-            // flat raised plate and two long ribs on the plateau (no marks or letters)
+            Rev(t, "BocaRespiradero", Profile(0f, 0f, 0.020f, 0f, 0.020f, 0.012f, 0.014f, 0.016f, 0.014f, 0.030f, 0f, 0.030f), 20, new Vector3(0f, 0.641f, -0.160f), 'y', c2);
+            TubeO(t, "MangueraRespiradero", new[] { new Vector3(0f, 0.664f, -0.160f), new Vector3(-0.04f, 0.690f, -0.185f), new Vector3(-0.14f, 0.688f, -0.205f), new Vector3(-0.23f, 0.672f, -0.205f) }, 0.012f, rubber);
+            // flat raised plate and a long rib on the plateau (no marks or letters)
             RCube(t, "PlacaLisa", new Vector3(-0.060f, 0.6445f, -0.040f), new Vector3(0.050f, 0.004f, 0.300f), c3);
             RCube(t, "NervioMeseta", new Vector3(-0.088f, 0.6445f, -0.040f), new Vector3(0.008f, 0.006f, 0.380f), c2);
         }
@@ -881,7 +1137,17 @@ namespace WorkingVehicles
         // ------------------------------------------------------------------ loose part (object on the ground)
 
         /// <summary>A physical object shaped like the part, which can be left on the ground and picked up.</summary>
-        public static GameObject CreateObject(int type)
+        public static GameObject CreateObject(int type) { return CreateObject(type, 0); }
+
+        /// <summary>The part as an object. 'level' is how worn it looks (0 new .. 3 ruined, see LevelOf): the colors age and oil / rust marks are added.</summary>
+        public static GameObject CreateObject(int type, int level)
+        {
+            ageLevel = Mathf.Clamp(level, 0, 3);
+            try { return CreateObjectNow(type, ageLevel); }
+            finally { ageLevel = 0; }
+        }
+
+        static GameObject CreateObjectNow(int type, int level)
         {
             var rootObj = new GameObject("WV_Part_" + Parts.Names[type]);
             var inner = new GameObject("Modelo").transform;
@@ -901,6 +1167,7 @@ namespace WorkingVehicles
                 }
             }
             finally { KX = 1f; }
+            if (level > 0) Weather(inner, type, level);
 
             // center the model and fit the size to what can be carried in the hand
             Renderer[] rs = inner.GetComponentsInChildren<Renderer>(true);
@@ -916,9 +1183,9 @@ namespace WorkingVehicles
         }
 
         /// <summary>Single mesh (one submesh per color) with the part's model, to put on a game object.</summary>
-        public static void BuildMesh(int type, out Mesh meshObj, out Material[] materialsOut)
+        public static void BuildMesh(int type, int level, out Mesh meshObj, out Material[] materialsOut)
         {
-            GameObject o = CreateObject(type);
+            GameObject o = CreateObject(type, level);
             var groups = new Dictionary<Material, List<CombineInstance>>();
             var order = new List<Material>();
             Matrix4x4 aLocal = o.transform.worldToLocalMatrix;
@@ -965,7 +1232,7 @@ namespace WorkingVehicles
 
         internal static Material Mat(Color c)
         {
-            int k = ((int)(c.r * 255f) << 16) | ((int)(c.g * 255f) << 8) | (int)(c.b * 255f);
+            int k = ((int)(c.r * 255f) << 16) | ((int)(c.g * 255f) << 8) | (int)(c.b * 255f) | (ageLevel << 24);
             Material m;
             if (materials.TryGetValue(k, out m) && m != null) return m;
 
@@ -987,12 +1254,12 @@ namespace WorkingVehicles
                 if (template == null)
                 {
                     foreach (Renderer r in UnityEngine.Object.FindObjectsOfType<MeshRenderer>())
-                        if (r != null && r.sharedMaterial != null && r.sharedMaterial.name.Contains("CarTruck")) { template = r.sharedMaterial; break; }
+                        if (r != null && r.sharedMaterial != null && r.sharedMaterial.name.ToLowerInvariant().Contains("truck")) { template = r.sharedMaterial; break; }
                 }
                 m = template != null ? new Material(template) : new Material(Shader.Find("Hidden/Internal-Colored"));
                 try { m.mainTexture = null; } catch (Exception) { }
             }
-            m.color = Paint.TurnOff(c);
+            m.color = Paint.TurnOff(ageLevel > 0 ? Aged(c, LevelCond[ageLevel]) : c);
             try { Texture2D pt = Paint.Textura(); if (pt != null) m.mainTexture = pt; } catch (Exception) { }
             m.hideFlags = HideFlags.DontUnloadUnusedAsset;
             materials[k] = m;

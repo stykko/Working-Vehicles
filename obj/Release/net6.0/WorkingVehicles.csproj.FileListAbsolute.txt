@@ -1,0 +1,13 @@
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\bin\Release\net6.0\WorkingVehicles.deps.json
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\bin\Release\net6.0\WorkingVehicles.dll
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\bin\Release\net6.0\WorkingVehicles.pdb
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\obj\Release\net6.0\WorkingVehicles.csproj.AssemblyReference.cache
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\obj\Release\net6.0\WorkingVehicles.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\obj\Release\net6.0\WorkingVehicles.AssemblyInfoInputs.cache
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\obj\Release\net6.0\WorkingVehicles.AssemblyInfo.cs
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\obj\Release\net6.0\WorkingVehicles.csproj.CoreCompileInputs.cache
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\obj\Release\net6.0\WorkingVehicles.dll
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\obj\Release\net6.0\refint\WorkingVehicles.dll
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\obj\Release\net6.0\WorkingVehicles.pdb
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\obj\Release\net6.0\ref\WorkingVehicles.dll
+C:\Users\jerem\Downloads\WorkingVehicles_1.0.13\WorkingVehicles\obj\Release\net6.0\WorkingV.524A8C17.Up2Date

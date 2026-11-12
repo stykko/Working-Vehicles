@@ -9,6 +9,11 @@ namespace WorkingVehicles
     {
         public static MelonPreferences_Entry<bool> Enabled, InvertTurnView, CorrectLimitView, DebugEntry, ExitOnLoad, Reports;
         public static MelonPreferences_Entry<float> VelMaxKmh, VelBackKmh, Acceleration, Braking, BrakeHand, Drag, TurnMax, Length, Width, Height, NormalGround, MarginObjects, SteeringDegrees, WheelsDegrees, SteeringForward, SteeringDown;
+        // Same driving values for CARS (separate entries; start equal to the truck's)
+        public static MelonPreferences_Entry<float> CarVelMaxKmh, CarVelBackKmh, CarAcceleration, CarBraking, CarBrakeHand, CarDrag, CarTurnMax, CarLength, CarWidth, CarHeight;
+        /// <summary>True while the vehicle being driven is a car (set by Mod).</summary>
+        public static bool CarNow;
+        public static float F(MelonPreferences_Entry<float> truck, MelonPreferences_Entry<float> car) { return (CarNow ? car : truck).Value; }
         public static MelonPreferences_Entry<string> TAccelerate, TBrake, TLeft, TRight, TBrakeHand;
 
         static readonly System.Collections.Generic.HashSet<string> merged = new System.Collections.Generic.HashSet<string>();
@@ -108,6 +113,16 @@ namespace WorkingVehicles
             Length = cat.CreateEntry("CollisionLength", 4.6f, "Collision box length (m)", "");
             Width = cat.CreateEntry("CollisionWidth", 1.9f, "Collision box width (m)", "");
             Height = cat.CreateEntry("CollisionHeight", 1.3f, "Collision box height (m)", "");
+            CarVelMaxKmh = cat.CreateEntry("Car_MaxSpeedKmh", 70f, "CAR top speed (km/h)", "Same as the truck's, for cars.");
+            CarVelBackKmh = cat.CreateEntry("Car_MaxReverseSpeedKmh", 20f, "CAR top reverse speed (km/h)", "");
+            CarAcceleration = cat.CreateEntry("Car_Acceleration", 4f, "CAR acceleration (m/s²)", "");
+            CarBraking = cat.CreateEntry("Car_Braking", 10f, "CAR braking (m/s²)", "");
+            CarBrakeHand = cat.CreateEntry("Car_Handbrake", 14f, "CAR handbrake (m/s²)", "");
+            CarDrag = cat.CreateEntry("Car_Drag", 1.6f, "CAR deceleration without accelerating (m/s²)", "");
+            CarTurnMax = cat.CreateEntry("Car_MaxTurnDegPerSec", 55f, "CAR maximum turn rate (°/s)", "");
+            CarLength = cat.CreateEntry("Car_CollisionLength", 4.6f, "CAR collision box length (m)", "");
+            CarWidth = cat.CreateEntry("Car_CollisionWidth", 1.9f, "CAR collision box width (m)", "");
+            CarHeight = cat.CreateEntry("Car_CollisionHeight", 1.3f, "CAR collision box height (m)", "");
             NormalGround = cat.CreateEntry("MaxSlope", 0.7f, "Maximum slope (0.7 = about 45°)", "Surfaces steeper than this count as a wall.");
             MarginObjects = cat.CreateEntry("ObjectMargin", 1.2f, "Margin for carrying objects (m)", "Loose objects (dropped things, boxes) within this distance of the truck travel with it.");
             SteeringDegrees = cat.CreateEntry("SteeringWheelDegrees", 100f, "How far the steering wheel turns to the stop (degrees)", "");

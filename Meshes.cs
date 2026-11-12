@@ -15,6 +15,7 @@ namespace WorkingVehicles
     /// </summary>
     internal class Body
     {
+        public bool car;                  // car: uses the car steering wheel adjustment
         public Transform pivotSteering;
         public Vector3 axisSteering = Vector3.forward;
         public float zero;      // rotation (degrees) at which the steering wheel looks straight; the model's spokes come tilted
@@ -25,7 +26,7 @@ namespace WorkingVehicles
 
         public void Apply(float degreesSteering)
         {
-            float fit = Settings.AdjustSteering();
+            float fit = Settings.AdjustSteering(car);
             float cacheKey = degreesSteering + (fit + zero) * 1000f;
             if (Mathf.Abs(cacheKey - lastVol) < 0.01f) return;
             lastVol = cacheKey;
@@ -78,7 +79,9 @@ namespace WorkingVehicles
             Vector3 sz = i.b.size;
             float[] a = { sz.x, sz.y, sz.z };
             Array.Sort(a);
-            return i.nVerts >= 20 && a[2] > 0.5f && a[2] < 1.3f && a[1] >= 0.6f * a[2] && a[0] <= 0.7f * a[1] && a[0] > 0.08f;
+            // A wheel is a disc: its two larger dimensions are almost equal (a[1] close to a[2]).
+            // 0.8 (and not 0.6) so that flat pieces like the Breyerhouse truck's front part (0.54 x 0.33 x 0.10) are not taken for wheels.
+            return i.nVerts >= 20 && a[2] > 0.5f && a[2] < 1.3f && a[1] >= 0.8f * a[2] && a[0] <= 0.7f * a[1] && a[0] > 0.08f;
         }
 
         static int Find(int[] parent, int a)

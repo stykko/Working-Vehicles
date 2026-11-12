@@ -4,7 +4,7 @@ using Il2Cpp;
 using MelonLoader;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(WorkingVehicles.Mod), "Working Vehicles", "1.0.4", "stykko")]
+[assembly: MelonInfo(typeof(WorkingVehicles.Mod), "Working Vehicles", "1.0.13", "stykko")]
 [assembly: MelonGame("Hinterland", "TheLongDark")]
 
 namespace WorkingVehicles
@@ -21,7 +21,8 @@ namespace WorkingVehicles
         public float level = 1f;         // snow: 0 = clean, 1 = all
         public float hour = -1f;         // in-game hours of the last snow update
         public float levelSaved = 1f;
-        public bool isTruck;         // the trucks need a battery
+        public bool isTruck;         // the trucks (and cars) need a battery: "motorized vehicle"
+        public bool isCar;           // car (uses the car settings); isTruck is also true for cars
         public bool battery;
         public float batteryCondition = 1f;
         public Hood hood;
@@ -34,10 +35,12 @@ namespace WorkingVehicles
         public Tank tank;            // fuel cap (trucks)
         public bool tankTried;
         public bool noticeLow;
+        public string gid;            // garage id: this vehicle was brought out of the garage (it is not a vehicle of the game)
 
         /// <summary>Why the truck cannot run (null = it can).</summary>
         public string Reason()
         {
+            if (isTruck && Settings.AuroraOnly() && !AuroraGate.Active()) return L.T("sin aurora: no hay energía", "no aurora: no power");
             if (!isTruck || !Settings.RequireBattery()) return null;
             if (!battery) return L.T("falta la batería", "the battery is missing");
             if (batteryCondition <= Parts.Min) return L.T("la batería está descargada (", "the battery is dead (") + Parts.Pct(batteryCondition) + ")";
@@ -71,7 +74,7 @@ namespace WorkingVehicles
     /// It doesn't touch getting in/out or the camera: the game already leaves the player at the door's "CameraDummy";
     /// the mod only moves the truck and drags the player and their view along with it.
     /// </summary>
-    public class Mod : MelonMod
+    public partial class Mod : MelonMod
     {
         // Game references (requested again when sitting down)
         PlayerInVehicle inVeh;
@@ -122,9 +125,13 @@ namespace WorkingVehicles
         public override void OnInitializeMelon()
         {
             Cfg.Init();
+            // translations of the Mod Options texts: the patches must be in place before the options page is registered
+            try { HarmonyInstance.CreateClassProcessor(typeof(LocalizationPatch)).Patch(); } catch (Exception e) { LoggerInstance.Warning("Localization patch (game strings): " + e.Message); }
+            try { HarmonyInstance.CreateClassProcessor(typeof(DescriptionTextTranslatePatch)).Patch(); } catch (Exception e) { LoggerInstance.Warning("Localization patch (descriptions): " + e.Message); }
             Settings.Start();
+            try { Radio.Scan(); } catch (Exception) { }           // creates the music folder (Mods\WorkingVehicles) so it is easy to find
             try { Patches.Apply(HarmonyInstance); } catch (Exception e) { LoggerInstance.Warning("Could not apply the inventory patches: " + e.Message); }
-            LoggerInstance.Msg("Working Vehicles 1.0.4 loaded. Keys (change them in Mod Options): " + Settings.KeyMod() + " = toggle mod, " + Settings.KeyMenu() + " = vehicle menu. Sit in the truck and use W A S D / Space.");
+            LoggerInstance.Msg("Working Vehicles 1.0.8 loaded. Keys (change them in Mod Options): " + Settings.KeyGarage() + " = garage, " + Settings.KeyMenu() + " = vehicle menu. Sit in a truck or car and use W A S D / Space.");
         }
 
         public override void OnUpdate()
@@ -133,16 +140,12 @@ namespace WorkingVehicles
             {
                 if (noticeT > 0f) noticeT -= Time.unscaledDeltaTime;
 
-                if (Input.GetKeyDown(Settings.KeyMod()))
-                {
-                    Cfg.Enabled.Value = !Cfg.Enabled.Value;
-                    LoggerInstance.Msg("Working Vehicles " + (Cfg.Enabled.Value ? "ON" : "OFF"));
-                }
-
                 if (!Cfg.Enabled.Value || Time.timeScale < 0.01f)
                 {
                     menuOpen = false;
                     hoodMenu = false;
+                    confirmStore = false;
+                    garageMenu = false;
                     if (driving && !Cfg.Enabled.Value) Stop("mod desactivado");
                     return;
                 }
@@ -150,7 +153,7 @@ namespace WorkingVehicles
                 if (!driving)
                 {
                     scanningT -= Time.unscaledDeltaTime;
-                    if (scanningT <= 0f) { scanningT = 2f; RestoreVehicles(); }
+                    if (scanningT <= 0f) { scanningT = 2f * Settings.ScanScale(); RestoreVehicles(); }
                 }
 
                 ProcessJob();
@@ -163,7 +166,7 @@ namespace WorkingVehicles
                 if (seated && !driving && job == null && !Settings.DriveOther())
                 {
                     Transform rv = RootOf(door);
-                    if (rv == null || !rv.name.Contains("CarTruck")) seated = false;
+                    if (rv == null || !IsTruckRoot(rv)) seated = false;
                 }
 
                 if (seated && !driving && job == null)
@@ -175,8 +178,17 @@ namespace WorkingVehicles
                 }
                 else if (!seated && driving) Stop("the player left or is in transition");
 
+                TickRadio();
+
                 if (driving)
                 {
+                    if (current.isRunning && Settings.AuroraOnly() && !AuroraGate.Active())
+                    {
+                        current.isRunning = false;
+                        engine.TurnOff();
+                        Notice(L.T("Terminó la aurora: el motor se apaga", "The aurora ended: the engine shuts off"));
+                        SavePosition();
+                    }
                     UpdateStarter(Mathf.Min(Time.deltaTime, 0.05f));
                     if (!current.isRunning && startsT <= 0f) offT += Time.unscaledDeltaTime; else offT = 0f;
                     ControlAc(Mathf.Min(Time.deltaTime, 0.05f));
@@ -189,6 +201,7 @@ namespace WorkingVehicles
                     menuOpen = false;
                     if (Input.GetKeyDown(Settings.KeyGenerate())) GenerateParts();
                     UpdateProps(Time.unscaledDeltaTime);
+                    GarageTick(Time.unscaledDeltaTime);
                     HandleHood(seated);
                     HandleFuel(seated);
                 }
@@ -210,6 +223,7 @@ namespace WorkingVehicles
 
         void HandleMenu()
         {
+            if (Radio.menu) return;                                     // the radio's menu has the keys
             if (Input.GetKeyDown(Settings.KeyMenu()))
             {
                 menuOpen = !menuOpen;
@@ -261,6 +275,38 @@ namespace WorkingVehicles
 
         // ------------------------------------------------------------------ battery: drains only when starting and with lights / A/C on while the engine is OFF; recharges while the engine runs
 
+        // The radio left on keeps playing from the vehicle when you get out (quieter and muffled), using the battery.
+        Veh radioVeh;
+
+        void TickRadio()
+        {
+            if (current != null)
+            {
+                if (radioVeh != current && Radio.on) Radio.TurnOff();      // you sat in another vehicle: the old one's radio goes off
+                radioVeh = current;
+            }
+            bool inside = driving && current != null;
+            if (inside)
+            {
+                Radio.Tick(true, current.isTruck && (current.isRunning ? !current.Broken && !current.WithoutFuel : current.battery && current.batteryCondition > Parts.Min), current.root);
+                return;
+            }
+            Veh v = radioVeh;
+            bool ok = v != null && v.root != null && v.root.gameObject.activeInHierarchy && v.battery && v.batteryCondition > Parts.Min;
+            if (ok)
+            {
+                Transform pl = GameManager.GetPlayerTransform();
+                ok = pl != null && (pl.position - v.root.position).sqrMagnitude < 150f * 150f;      // far away it is switched off (and stops using the battery)
+            }
+            if (Radio.on && ok)
+            {
+                v.batteryCondition = Mathf.Clamp01(v.batteryCondition - Settings.BatteryDrain() / 5f / 100f * Time.deltaTime);
+                if (v.batteryCondition <= Parts.Min) ok = false;
+            }
+            if (Radio.on && !ok) { Radio.TurnOff(); try { if (v != null && v.root != null) SaveVeh(v); } catch (Exception) { } }
+            Radio.Tick(false, ok && Radio.on, ok ? v.root : null);
+        }
+
         void DrainBattery(float dt)
         {
             if (current == null || !current.isTruck || !current.battery) return;
@@ -269,7 +315,7 @@ namespace WorkingVehicles
             bool running = current.isRunning && !current.WithoutFuel;
             float change = 0f;
             if (startsT > 0f) change -= Settings.BatteryDrain() / 5f * 3f;             // starting the engine costs battery
-            else if (!running && (ac || lights)) change -= Settings.BatteryDrain() / 5f;   // lights / A/C with the engine OFF drain it
+            else if (!running && (ac || lights || Radio.on)) change -= Settings.BatteryDrain() / 5f;   // lights / A/C / radio with the engine OFF drain it
             else if (running) change += Settings.BatteryRecharge() / 10f;              // engine running: recharges, nothing drains it
             if (change == 0f) return;
             float before = current.batteryCondition;
@@ -352,12 +398,13 @@ namespace WorkingVehicles
         static bool RowHidden(int i) { return i == Parts.Count + 1 && !Settings.Debug(); }
         string hint = "";
         // 0 = battery, 1..6 = engine parts, then pack and exit
-        static readonly string[] optionsHood = { "Batería", Parts.NameOf(0), Parts.NameOf(1), Parts.NameOf(2), Parts.NameOf(3), Parts.NameOf(4), Parts.NameOf(5), "Soltar la mochila en el suelo", "Salir" };
+        static readonly string[] optionsHood = { "Batería", Parts.NameOf(0), Parts.NameOf(1), Parts.NameOf(2), Parts.NameOf(3), Parts.NameOf(4), Parts.NameOf(5), "Soltar la mochila en el suelo", "Guardar el vehículo en el garaje", "Salir" };
         const string NameBattery = "GEAR_CarBattery";
 
         public override void OnLateUpdate()
         {
             Blur.Update(Time.unscaledDeltaTime);
+            try { Trunk.Tick(Time.deltaTime); } catch (Exception) { }
             try
             {
                 foreach (Veh v in vehs.Values)
@@ -557,7 +604,7 @@ namespace WorkingVehicles
             }
             propsT -= dt;
             if (propsT > 0f) return;
-            propsT = 1.5f;
+            propsT = 1.5f * Settings.ScanScale();
             Storage.Ensure(Persistence.Slot());
             if (PartItems.Active && !PartItems.Blocked && Storage.ground.Count > 0)
             {
@@ -613,7 +660,7 @@ namespace WorkingVehicles
         void HandleHood(bool seated)
         {
             hint = "";
-            if (seated || job != null) { hoodMenu = false; return; }
+            if (seated || job != null) { hoodMenu = false; confirmStore = false; return; }
             Camera cam = GameManager.GetMainCamera();
             if (cam == null) return;
             Vector3 o = cam.transform.position, f = cam.transform.forward;
@@ -625,9 +672,11 @@ namespace WorkingVehicles
                 if (hoodVeh == null || hoodVeh.root == null || hoodVeh.hood == null || (hoodVeh.hood.PointEngine() - o).sqrMagnitude > 25f)
                 {
                     hoodMenu = false;
+                    confirmStore = false;
                 }
                 else
                 {
+                    if (HandleConfirmStore()) return;
                     if (Input.GetKeyDown(KeyCode.Backspace) || Input.GetKeyDown(hotkey)) { hoodMenu = false; return; }
                     if (Input.GetKeyDown(KeyCode.DownArrow)) { selHood = (selHood + 1) % optionsHood.Length; if (RowHidden(selHood)) selHood = (selHood + 1) % optionsHood.Length; }
                     if (Input.GetKeyDown(KeyCode.UpArrow)) { selHood = (selHood + optionsHood.Length - 1) % optionsHood.Length; if (RowHidden(selHood)) selHood = (selHood + optionsHood.Length - 1) % optionsHood.Length; }
@@ -636,6 +685,7 @@ namespace WorkingVehicles
                         if (selHood == 0) ActionBattery(hoodVeh);
                         else if (selHood <= Parts.Count) ActionPart(hoodVeh, selHood - 1);
                         else if (selHood == Parts.Count + 1) { if (PartItems.Active) GenerateParts(); else DropPack(); }
+                        else if (selHood == Parts.Count + 2) { confirmStore = true; selConfirm = 1; }
                         else hoodMenu = false;
                     }
                     return;
@@ -690,7 +740,7 @@ namespace WorkingVehicles
             v.hoodTried = true;
             VehicleDoor d = v.root.GetComponentInChildren<VehicleDoor>(true);
             Vector3 eye;
-            v.hood = Hood.Create(v.root, Front(v.root, d, out eye));
+            v.hood = Hood.Create(v.root, Front(v.root, d, out eye), v.isCar);
             ApplyHood(v);
         }
 
@@ -699,66 +749,71 @@ namespace WorkingVehicles
             if (v.hood != null && v.parts != null) v.hood.Apply(v.parts, v.battery);
         }
 
+        bool uiLogged, uiLogged2;
+
         void DrawHood(float W, float H)
         {
             float e = Ui.Sc;
+            if (confirmStore && hoodVeh != null) { DrawGarage(W, H); return; }
             if (hoodMenu && hoodVeh != null)
             {
                 Veh v = hoodVeh;
-                int rows = optionsHood.Length;
-                float[] height = new float[rows];
-                float sum = 0f;
-                for (int i = 0; i < rows; i++)
-                {
-                    height[i] = RowHidden(i) ? 0f : (i <= Parts.Count ? 56f : 42f) * e;
-                    sum += height[i];
-                }
-                float hPanel = 82f * e + sum + 100f * e + 56f * e;
-                Rect box = new Rect(W * 0.5f - 330f * e, H * 0.5f - hPanel * 0.5f, 660f * e, hPanel);
+                float k = 1.08f * e;                                       // 1 unit = 1 pixel of the reference screen (panel 640 x 666)
                 string mot = v.Reason();
-                Rect u = Ui.Panel(box, L.T("Motor", "Engine"), mot == null ? L.T("Todo en orden para arrancar", "Everything is ready to start") : L.T("No arranca: ", "Won't start: ") + mot, mot == null ? Ui.Green : Ui.Red);
-                float y = u.y;
-                for (int i = 0; i < rows; i++)
+                int nBtn = RowHidden(Parts.Count + 1) ? 2 : 3;
+                bool worn2 = mot == null && v.WornOnes() >= 2;
+                float rowH = 59.7f * k;
+                float yBtn = 579f * k;
+                float yEnd = yBtn + nBtn * 39f * k - 8f * k;
+                float hPanel = yEnd + 25f * k + 13f * k + 32f * k + (worn2 ? 26f * k : 0f);
+                Rect box = new Rect(W * 0.5f - 320f * k, H * 0.5f - hPanel * 0.5f, 640f * k, hPanel);
+                string sub = mot == null ? L.T("Todas las piezas están en su lugar. El motor está listo para arrancar.", "All parts are in place. Engine is ready to start.") : L.T("No arranca: ", "Won't start: ") + mot;
+                if (!uiLogged) { uiLogged = true; LoggerInstance.Msg("[Ui] drawing the engine screen (first frame)"); }
+                Ui.Panel(box, L.T("Motor", "Engine"), sub, mot == null ? Ui.Green : Ui.Red, 7);
+                float x0 = box.x + 36f * k, wRow = 568f * k;
+                float y = box.y + 125f * k;
+                for (int i = 0; i <= Parts.Count; i++)
                 {
-                    if (height[i] <= 0f) continue;
-                    Rect row = new Rect(u.x, y, u.width, height[i]);
-                    y += height[i];
-                    string names; string value = ""; Color cv = Ui.Gray; float bar = -1f; Color cb = Ui.Green;
-                    if (i == 0)
+                    Rect row = new Rect(x0, y, wRow, rowH);
+                    y += rowH;
+                    string value; string tag = ""; Color cv = Ui.White, ct = Ui.Gray, cb = Ui.Sage; float bar = 0f;
+                    float c = i == 0 ? (v.battery ? v.batteryCondition : -1f) : (v.parts != null ? v.parts[i - 1] : -1f);
+                    if (c >= 0f)
                     {
-                        names = L.T("Batería", "Battery");
-                        if (v.battery)
-                        {
-                            value = Parts.Pct(v.batteryCondition) + (v.batteryCondition <= Parts.Min ? L.T("  inservible", "  useless") : v.batteryCondition < Parts.Worn ? L.T("  gastada", "  worn") : "");
-                            cv = cb = v.batteryCondition <= Parts.Min ? Ui.Red : v.batteryCondition < Parts.Worn ? Ui.Yellow : Ui.Green;
-                            bar = v.batteryCondition;
-                        }
-                        else { value = L.T("FALTA  (tenés ", "MISSING  (you have ") + BatteriesInInventory() + ")"; cv = Ui.Red; }
+                        value = Parts.Pct(c); bar = c;
+                        if (c <= Parts.Min) { cv = ct = cb = Ui.Red; tag = L.T("inservible", "useless"); }
+                        else if (c < Parts.Worn) { cv = ct = cb = Ui.Amber; tag = L.T("gastada", "worn"); }
                     }
-                    else if (i <= Parts.Count)
+                    else
                     {
-                        names = Parts.NameOf(i - 1);
-                        float c = v.parts != null ? v.parts[i - 1] : -1f;
-                        if (c >= 0f)
-                        {
-                            value = Parts.Pct(c) + (c <= Parts.Min ? L.T("  inservible", "  useless") : c < Parts.Worn ? L.T("  gastada", "  worn") : "");
-                            cv = cb = c <= Parts.Min ? Ui.Red : c < Parts.Worn ? Ui.Yellow : Ui.Green;
-                            bar = c;
-                        }
-                        else { value = (L.T("FALTA  (tenés ", "MISSING  (you have ")) + (PartItems.Active ? PartItems.HowMany(i - 1) : Storage.HowMany(i - 1)) + ")"; cv = Ui.Red; }
+                        int have = i == 0 ? BatteriesInInventory() : (PartItems.Active ? PartItems.HowMany(i - 1) : Storage.HowMany(i - 1));
+                        value = L.T("FALTA", "MISSING"); cv = Ui.Red; ct = Ui.Gray; tag = L.T("tenés ", "you have ") + have;
                     }
-                    else if (i == Parts.Count + 1) names = PartItems.Active ? L.T("Conseguir piezas nuevas (juego de 6)", "Get new parts (set of 6)") : L.T("Soltar la mochila en el suelo", "Drop the pack on the ground");
-                    else names = L.T("Salir", "Exit");
-                    Ui.Row(row, names, value, cv, i == selHood, bar, cb);
+                    Ui.IconRow(row, k, i == 0 ? 0 : i, i == 0 ? L.T("Batería", "Battery") : Parts.NameOf(i - 1), value, tag, cv, ct, i == selHood, bar, cb);
+                }
+                if (!uiLogged2) { uiLogged2 = true; LoggerInstance.Msg("[Ui] engine screen: rows drawn"); }
+                // hairline above the buttons
+                Ui.Fill(new Rect(x0, box.y + 560f * k, wRow, Mathf.Max(1f, e)), new Color(40f / 255f, 46f / 255f, 48f / 255f, 1f));
+                float by = box.y + yBtn;
+                for (int j = Parts.Count + 1; j < optionsHood.Length; j++)
+                {
+                    if (RowHidden(j)) continue;
+                    string label = j == Parts.Count + 1 ? (PartItems.Active ? L.T("Conseguir piezas nuevas (juego de 6)", "Get new parts (set of 6)") : L.T("Soltar la mochila en el suelo", "Drop the pack on the ground"))
+                                 : j == Parts.Count + 2 ? L.T("Guardar el vehículo en el garaje", "Store the vehicle in the garage") : L.T("Salir", "Exit");
+                    float bw = Mathf.Max(227f * k, Ui.TextWidth(Ui.Upper(label), Ui.FontFit(19f, k), false) + 70f * k);
+                    Ui.ButtonPaint(new Rect(box.x + (640f * k - bw) * 0.5f, by, bw, 31f * k), k, label, j == selHood);
+                    by += 39f * k;
                 }
                 string inv = PartItems.Active ? L.T("Piezas del motor en tu inventario: ", "Engine parts in your inventory: ") + PartItems.Total() : L.T("Mochila: ", "Pack: ") + Storage.Summary();
-                Ui.Text(new Rect(u.x + 20f * e, y + 8f * e, u.width - 40f, 26f * e), inv, 17f, new Color(0.7f, 0.82f, 1f), TextAnchor.MiddleLeft, false);
-                if (mot == null && v.WornOnes() >= 2)
-                    Ui.Text(new Rect(u.x + 20f * e, y + 34f * e, u.width - 40f, 26f * e), L.T("Hay ", "There are ") + v.WornOnes() + L.T(" piezas gastadas: puede costar arrancar", " worn parts: starting may take a few tries"), 17f, Ui.Yellow, TextAnchor.MiddleLeft, false);
-                Ui.Footer(box, L.T("Flechas", "Arrows"), L.T("Mover", "Move"), "Enter", L.T("Instalar / sacar", "Install / remove"), Settings.KeyHood().ToString(), L.T("Cerrar", "Close"));
+                float iy = box.y + yEnd + 25f * k;
+                Ui.Text(new Rect(box.x, iy - 13f * k, 640f * k, 26f * k), inv, Ui.FontFit(17f, k), new Color(0.78f, 0.8f, 0.8f), TextAnchor.MiddleCenter, false);
+                if (worn2)
+                    Ui.Text(new Rect(box.x, iy + 13f * k, 640f * k, 26f * k), L.T("Hay ", "There are ") + v.WornOnes() + L.T(" piezas gastadas: puede costar arrancar", " worn parts: starting may take a few tries"), Ui.FontFit(17f, k), Ui.Amber, TextAnchor.MiddleCenter, false);
+                Ui.KeysBelow(box, L.T("Flechas", "Arrows"), L.T("Mover", "Move"), "Enter", L.T("Instalar / sacar", "Install / remove"), Settings.KeyHood().ToString(), L.T("Cerrar", "Close"));
                 return;
             }
 
+            if (garageMenu) { DrawGarage(W, H); return; }
             string line = noticeT > 0f ? notice : hint;
             if (!string.IsNullOrEmpty(line))
             {
@@ -917,6 +972,7 @@ namespace WorkingVehicles
                 if (!driving) { DrawHood(W, H); return; }
 
                 if (menuOpen) { DrawMenu(W, H); return; }
+                if (Radio.menu) { Radio.Draw(W, H); return; }
 
                 if (current.dashboard != null && current.dashboard.inAdjust)
                 {
@@ -1005,7 +1061,8 @@ namespace WorkingVehicles
             v.isRunning = d != null ? d.isRunning : Settings.StartOnSit();
             v.steering = d != null ? d.steering : 0f;
             v.level = d != null ? d.level : 1f;
-            v.isTruck = r.name.Contains("CarTruck");
+            v.isTruck = IsTruckRoot(r);
+            v.isCar = v.isTruck && IsCarRoot(r);
             v.battery = d != null && d.battery;
             v.batteryCondition = d != null ? d.batteryCondition : 1f;
             v.fuel = d != null ? d.fuel : 0.4f;
@@ -1025,7 +1082,7 @@ namespace WorkingVehicles
                 Vector3 eye;
                 Vector3 fwd = Front(v.root, door, out eye);
                 v.body = Body.Create(v.root, Eyes(v.root, door), fwd);
-                if (v.body != null) v.body.Apply(v.steering);
+                if (v.body != null) { v.body.car = v.isCar; v.body.Apply(v.steering); }
             }
             catch (Exception e) { LoggerInstance.Warning("Could not prepare the steering wheel/wheels of '" + v.root.name + "': " + e.Message); }
         }
@@ -1063,6 +1120,8 @@ namespace WorkingVehicles
 
             seen.Add(root.GetInstanceID());
             current = GetVeh(root);
+            Cfg.CarNow = current.isCar;
+            LoggerInstance.Msg("[Options] " + Settings.Describe(current.isCar));
             CaptureObjects(fwd);
             Hierarchy.Dump(root);
             PrepareBody(current, door);
@@ -1093,7 +1152,7 @@ namespace WorkingVehicles
                 if (v.dashboardTried || v.dashboardT < 0.4f) return;
                 v.dashboardTried = true;
                 Camera c0 = GameManager.GetMainCamera();
-                if (c0 != null) v.dashboard = Dashboard.Create(v.root, fwdLocal, c0.transform.position);
+                if (c0 != null) v.dashboard = Dashboard.Create(v.root, fwdLocal, c0.transform.position, v.isCar);
                 if (v.dashboard == null) return;
                 v.dashboard.Resume();
             }
@@ -1101,8 +1160,9 @@ namespace WorkingVehicles
             Camera cam = GameManager.GetMainCamera();
             bool broken = v.Broken;
             t.fuel = v.fuel;
-            t.Update(v.isRunning && !broken && !v.WithoutFuel, broken, vel, accelCurrent, Cfg.VelMaxKmh.Value, dt);
+            t.Update(v.isRunning && !broken && !v.WithoutFuel, broken, vel, accelCurrent, Cfg.F(Cfg.VelMaxKmh, Cfg.CarVelMaxKmh), dt);
             if (menuOpen) return;
+            if (Radio.menu) { Radio.HandleMenu(); return; }
             if (!t.inAdjust && Input.GetKeyDown(Settings.KeyDashboard())) { t.StartAdjust(); return; }
             if (t.inAdjust)
             {
@@ -1112,10 +1172,42 @@ namespace WorkingVehicles
             }
             int which;
             string txt = t.Aim(cam, broken, out which);
+            // the game's own radio (the one that shows "Radio" when you aim at it): the click opens the mod's radio menu
+            if (txt == null && GameRadioLooked())
+            {
+                if (Input.GetMouseButtonDown(0)) Radio.Open();
+                return;
+            }
             if (txt == null) return;
             dashboardLine = txt;
             if (Input.GetMouseButtonDown(0))
-                Notice(which == Dashboard.Lights ? t.ToggleLights(broken) : t.ToggleAc(broken));
+                Notice(which == Dashboard.Lights ? t.ToggleLights(broken) : which == Dashboard.Trunk ? t.ToggleTrunk() : t.ToggleAc(broken));
+        }
+
+        readonly HashSet<string> lookedNames = new HashSet<string>();
+
+        /// <summary>True if the object under the crosshair is the radio of the dashboard (found by the game's own aim: name or label "Radio").</summary>
+        bool GameRadioLooked()
+        {
+            try
+            {
+                PlayerManager pm = GameManager.GetPlayerManagerComponent();
+                if (pm == null) return false;
+                GameObject o = pm.GetInteractiveObjectUnderCrosshairs(3f);
+                string h = null;
+                try { h = pm.GetInteractiveObjectHoverText(); } catch (Exception) { }
+                string chain = "";
+                if (o != null)
+                {
+                    int i = 0;
+                    for (Transform tr = o.transform; tr != null && i < 4; tr = tr.parent, i++) chain += (i > 0 ? " < " : "") + tr.name;
+                }
+                if (chain.Length > 0 && lookedNames.Count < 25 && lookedNames.Add(chain + " | " + h))
+                    LoggerInstance.Msg("[Radio] aiming at: '" + chain + "' (text '" + h + "')");
+                if (chain.ToLowerInvariant().Contains("radio")) return true;
+                return o != null && !string.IsNullOrEmpty(h) && h.Trim().ToLowerInvariant() == "radio";
+            }
+            catch (Exception) { return false; }
         }
 
         // ------------------------------------------------------------------ fuel
@@ -1135,7 +1227,7 @@ namespace WorkingVehicles
             }
             if (!on) return;
             // consumption by distance (configurable km per liter) plus a little at idle (0.2 mL per second)
-            float liters = Mathf.Abs(vel) * dt / (Settings.KmPerLiter() * 1000f) + 0.0002f * dt;
+            float liters = Mathf.Abs(vel) * dt / (Settings.KmPerLiter(current.isCar) * 1000f) + 0.0002f * dt;
             current.fuel = Mathf.Max(0f, current.fuel - liters / DataTank.Capacity);
             if (current.fuel < 0.1f && !current.noticeLow) { current.noticeLow = true; Notice(L.T("Combustible bajo", "Low fuel")); }
             if (current.fuel >= 0.12f) current.noticeLow = false;
@@ -1152,6 +1244,8 @@ namespace WorkingVehicles
         readonly SoundLoad soundLoad = new SoundLoad();
         float scanningPumpT;
         Veh filling;
+        readonly List<Jerry.Can> cans = new List<Jerry.Can>();
+        float jerryScanT;
 
         void CutLoad()
         {
@@ -1170,12 +1264,17 @@ namespace WorkingVehicles
             bool hasTruck = false;
             foreach (Veh t in vehs.Values)
                 if (t.isTruck && t.root != null && (t.root.position - o).sqrMagnitude < 400f) { hasTruck = true; break; }
-            if (!hasTruck) { Pumps.near.Clear(); CutLoad(); return; }
+            // jerry cans in the inventory (checked twice a second)
+            jerryScanT -= Time.unscaledDeltaTime;
+            if (jerryScanT <= 0f) { jerryScanT = 0.5f; Jerry.Find(cans); }
+            bool hasCan = cans.Count > 0;
+
+            if (!hasTruck && !(hasCan && Settings.JerryAtPumps())) { Pumps.near.Clear(); CutLoad(); return; }
 
             scanningPumpT -= Time.unscaledDeltaTime;
             if (scanningPumpT <= 0f)
             {
-                scanningPumpT = 0.5f;
+                scanningPumpT = 0.5f * Mathf.Min(Settings.ScanScale(), 3f);
                 bool capOpenState = false;
                 foreach (Veh t in vehs.Values)
                 {
@@ -1189,6 +1288,8 @@ namespace WorkingVehicles
             {
                 foreach (Veh t in vehs.Values) if (t.tank != null && t.root != null) t.tank.Update();
             }
+
+            if (hasTruck && hasCan && PourFromCan(o, f)) return;
 
             Pumps.Pump crosshair = null;
             float bestCos = 0.8f;
@@ -1212,6 +1313,9 @@ namespace WorkingVehicles
                 float dd = p.magnitude;
                 if (dd < bestD) { bestD = dd; veh = t; }
             }
+            // the truck is not ready to be filled at the pump (far away, cap closed or full): a jerry can can be filled instead
+            bool truckReady = veh != null && bestD <= 5f && veh.tank.open && veh.fuel < 0.999f;
+            if (!truckReady && hasCan && FillCan(crosshair)) return;
             if (veh == null) { CutLoad(); return; }
             if (bestD > 5f) { hint = L.T("Acercá la camioneta a la bomba (con el tapón del tanque de su lado)", "Park the truck next to the pump (fuel cap side facing it)"); CutLoad(); return; }
             if (!veh.tank.open) { hint = L.T("Abrí el tapón del tanque de la camioneta (mantené el clic sobre la tapa)", "Open the truck's fuel cap (hold click on the cover)"); CutLoad(); return; }
@@ -1228,6 +1332,68 @@ namespace WorkingVehicles
                 if (veh.fuel >= 0.999f) { veh.fuel = 1f; Notice(L.T("Tanque lleno", "Tank full")); CutLoad(); }
             }
             else CutLoad();
+        }
+
+        /// <summary>Looking at the open fuel cap of a truck with a jerry can in the inventory: hold click to pour it in (the can keeps 1 %).</summary>
+        bool PourFromCan(Vector3 o, Vector3 f)
+        {
+            try
+            {
+                LiquidItem li = Jerry.FullestPourable(cans);
+                if (li == null) return false;
+                Veh best = null;
+                float bestC = 0.9f;
+                foreach (Veh t in vehs.Values)
+                {
+                    if (!t.isTruck || t.root == null || t.tank == null || !t.tank.open) continue;
+                    Vector3 d = t.tank.Point() - o;
+                    float dist = d.magnitude;
+                    if (dist > 3.2f || dist < 0.05f) continue;
+                    float c = Vector3.Dot(f, d / dist);
+                    if (c > bestC) { bestC = c; best = t; }
+                }
+                if (best == null) return false;
+                if (best.fuel >= 0.999f) { hint = L.T("Tanque lleno (", "Tank full (") + Mathf.RoundToInt(DataTank.Capacity) + " L)"; CutLoad(); return true; }
+
+                float have = Jerry.Available(li);
+                hint = L.T("[Mantené el clic] Verter el bidón en el tanque: ", "[Hold click] Pour the jerry can into the tank: ") + have.ToString("0.0") + " L";
+                if (Input.GetMouseButton(0))
+                {
+                    float liters = Mathf.Min(DataTank.Airflow * Time.deltaTime, have, (1f - best.fuel) * DataTank.Capacity);
+                    filling = best;
+                    best.fuel = Mathf.Min(1f, best.fuel + liters / DataTank.Capacity);
+                    best.noticeLow = false;
+                    Jerry.Set(li, Jerry.Amount(li) - liters);
+                    soundLoad.Play(true, best.tank.Point());
+                    if (best.fuel >= 0.999f) { best.fuel = 1f; Notice(L.T("Tanque lleno", "Tank full")); CutLoad(); }
+                    else if (Jerry.Available(li) <= 0.01f) { Notice(L.T("El bidón quedó casi vacío (1 %)", "The jerry can is almost empty (1 %)")); CutLoad(); }
+                }
+                else CutLoad();
+                return true;
+            }
+            catch (Exception e) { if (Cfg.DebugLog) LoggerInstance.Warning("[Jerry] pour: " + e.Message); return false; }
+        }
+
+        /// <summary>Looking at a pump with a jerry can in the inventory: hold click to fill it.</summary>
+        bool FillCan(Pumps.Pump pump)
+        {
+            try
+            {
+                if (!Settings.JerryAtPumps()) return false;
+                LiquidItem li = Jerry.EmptiestFillable(cans);
+                if (li == null) return false;
+                float cap = Jerry.Capacity(li), vol = Jerry.Amount(li);
+                hint = L.T("[Mantené el clic] Llenar el bidón: ", "[Hold click] Fill the jerry can: ") + vol.ToString("0.0") + " L / " + cap.ToString("0.0") + " L";
+                if (Input.GetMouseButton(0))
+                {
+                    Jerry.Set(li, Mathf.Min(cap, vol + DataTank.Airflow * Time.deltaTime));
+                    soundLoad.Play(true, pump.center);
+                    if (Jerry.Amount(li) >= cap - 0.01f) { Jerry.Set(li, cap); Notice(L.T("Bidón lleno", "Jerry can full")); CutLoad(); }
+                }
+                else CutLoad();
+                return true;
+            }
+            catch (Exception e) { if (Cfg.DebugLog) LoggerInstance.Warning("[Jerry] fill: " + e.Message); return false; }
         }
 
         void Stop(string reason)
@@ -1247,6 +1413,7 @@ namespace WorkingVehicles
             engine.TurnOff();
             root = null;
             current = null;
+            Cfg.CarNow = false;
         }
 
         // ------------------------------------------------------------------ saving the state
@@ -1259,8 +1426,82 @@ namespace WorkingVehicles
                 if (t.name.StartsWith("ENCAMPMENT")) return t;
                 t = t.parent;
             }
+            // Some vehicles (for example the one at Breyerhouse, Mystery Lake) are not under an "ENCAMPMENT_..." object:
+            // use the closest ancestor that looks like a truck, otherwise the direct parent.
+            t = door.transform.parent;
+            while (t != null)
+            {
+                if (NameLooksLikeTruck(t.name)) return t;
+                t = t.parent;
+            }
             return door.transform.parent;
         }
+
+        static bool NameLooksLikeTruck(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            string n = name.ToLowerInvariant();
+            return NameLooksLikeTruckOnly(n) || NameLooksLikeCar(n);
+        }
+
+        static bool NameLooksLikeTruckOnly(string lowerName)
+        {
+            return lowerName.Contains("cartruck") || lowerName.Contains("truck") || lowerName.Contains("pickup");
+        }
+
+        // Vehicles that must never get the engine system.
+        static readonly string[] notCars = { "tractor", "trailer", "snowmobile", "cart", "carcass", "carry", "carrot", "carbon", "carpet", "cargo", "carton", "card", "care", "cartridge" };
+
+        /// <summary>Does the name look like a passenger car (sedan, coupe, wagon, SUV, "Car...")? Cars use the same engine system as the truck.</summary>
+        static bool NameLooksLikeCar(string lowerName)
+        {
+            if (string.IsNullOrEmpty(lowerName)) return false;
+            string n = lowerName.ToLowerInvariant();
+            if (NameLooksLikeTruckOnly(n)) return false;
+            foreach (string bad in notCars) if (n.Contains(bad)) return false;
+            return n.Contains("sedan") || n.Contains("coupe") || n.Contains("wagon") || n.Contains("suv") || n.Contains("hatch") || n.Contains("car");
+        }
+
+        // 0 = not a motorized vehicle, 1 = truck, 2 = car
+        static readonly Dictionary<int, int> kindCache = new Dictionary<int, int>();
+        static readonly HashSet<string> rejectedLogged = new HashSet<string>();
+
+        static int KindOf(Transform r)
+        {
+            if (r == null) return 0;
+            int id = r.GetInstanceID();
+            int kind;
+            if (kindCache.TryGetValue(id, out kind)) return kind;
+            string rn = r.name.ToLowerInvariant();
+            if (NameLooksLikeTruckOnly(rn)) kind = 1;
+            else if (NameLooksLikeCar(rn)) kind = 2;
+            else
+            {
+                bool hood = false, fuel = false;
+                foreach (Transform t in r.GetComponentsInChildren<Transform>(true))
+                {
+                    string n = t.name.ToLowerInvariant();
+                    if (n.Contains("hoodhinge")) hood = true;
+                    else if (n.Contains("fuelcoverhinge")) fuel = true;
+                    if (hood && fuel) break;
+                }
+                bool excluded = false;
+                foreach (string bad in notCars) if (rn.Contains(bad)) { excluded = true; break; }
+                if (hood && fuel) kind = 1;                                   // Breyerhouse truck (any name)
+                else if (hood && !excluded && r.GetComponentInChildren<VehicleDoor>(true) != null) kind = 2;   // a car with only a hood hinge
+                else kind = 0;
+            }
+            kindCache[id] = kind;
+            if (kind == 0 && rejectedLogged.Add(r.name))
+                MelonLogger.Msg("Vehicle '" + r.name + "' is not treated as a truck or car (enable 'Drive other vehicles' in Mod Options to try it anyway). If this is a car or truck, report this name.");
+            else if (kind != 0 && rejectedLogged.Add("ok:" + r.name))
+                MelonLogger.Msg("Vehicle '" + r.name + "' detected as a " + (kind == 1 ? "truck" : "car") + ".");
+            return kind;
+        }
+
+        /// <summary>Is this a motorized vehicle (truck or car)?</summary>
+        static bool IsTruckRoot(Transform r) { return KindOf(r) != 0; }
+        static bool IsCarRoot(Transform r) { return KindOf(r) == 2; }
 
         void SavePosition()
         {
@@ -1272,6 +1513,7 @@ namespace WorkingVehicles
         {
             if (v == null || v.root == null) return;
             v.levelSaved = v.level;
+            if (v.gid != null) { SaveGarageVehicle(v); return; }
             Persistence.Save(Persistence.Slot(), new Data
             {
                 orig = v.orig,
@@ -1292,7 +1534,13 @@ namespace WorkingVehicles
         // with the snow, steering wheel and wheels as you left them.
         void RestoreVehicles()
         {
-            foreach (VehicleDoor d in UnityEngine.Object.FindObjectsOfType<VehicleDoor>())
+            List<VehicleDoor> doors = FindDoors();
+            if (!scanLogged && (doors.Count > 0 || Time.realtimeSinceStartup - lastLoad > 20f))
+            {
+                scanLogged = true;
+                LoggerInstance.Msg("[Vehicles] scan in scene '" + Scene() + "': " + doors.Count + " vehicle doors found.");
+            }
+            foreach (VehicleDoor d in doors)
             {
                 if (d == null) continue;
                 Transform r = RootOf(d);
@@ -1300,9 +1548,52 @@ namespace WorkingVehicles
             }
         }
 
+        bool scanLogged;
+
+        static bool doorsReported;
+
+        /// <summary>
+        /// All the vehicle doors in the loaded scenes. FindObjectsOfType is used first; mods that filter it (e.g. SeamlessInteriors) can make it
+        /// return nothing, so FindObjectsOfTypeAll (only objects that live in a loaded scene, not prefabs) is added as a second source.
+        /// </summary>
+        static List<VehicleDoor> FindDoors()
+        {
+            var res = new List<VehicleDoor>();
+            var ids = new HashSet<int>();
+            int normal = 0;
+            try
+            {
+                foreach (VehicleDoor d in UnityEngine.Object.FindObjectsOfType<VehicleDoor>())
+                    if (d != null && ids.Add(d.GetInstanceID())) { res.Add(d); normal++; }
+            }
+            catch (Exception) { }
+            try
+            {
+                foreach (VehicleDoor d in Resources.FindObjectsOfTypeAll<VehicleDoor>())
+                {
+                    if (d == null || d.gameObject == null) continue;
+                    UnityEngine.SceneManagement.Scene sc = d.gameObject.scene;
+                    if (!sc.IsValid() || !sc.isLoaded) continue;           // prefabs and assets are left out
+                    if (!d.gameObject.activeInHierarchy) continue;
+                    if (ids.Add(d.GetInstanceID())) res.Add(d);
+                }
+            }
+            catch (Exception) { }
+            if (res.Count > normal && !doorsReported)
+            {
+                doorsReported = true;
+                MelonLoader.MelonLogger.Msg("[Vehicles] FindObjectsOfType found " + normal + " vehicle doors, the fallback search found " + (res.Count - normal) + " more (another mod is probably filtering the search).");
+            }
+            return res;
+        }
+
         bool RestoreOne(Transform r, VehicleDoor d)
         {
             if (!seen.Add(r.GetInstanceID())) return false;
+
+            Data dat0 = Persistence.Find(Persistence.Slot(), r.position);
+            if (dat0 != null && dat0.stored) { r.gameObject.SetActive(false); return true; }   // it is in the garage
+            if (IsTruckRoot(r)) Garage.CacheTemplate(r);     // pristine copy, to be able to build it in other regions
 
             Veh v = GetVeh(r);
             CreateHood(v);
@@ -1335,7 +1626,13 @@ namespace WorkingVehicles
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
         {
             lastLoad = Time.realtimeSinceStartup;
+            scanLogged = false;
             PartItems.ResetExamine();
+            live.Clear();
+            Trunk.Reset();
+            Radio.Reset();
+            confirmStore = false;
+            garageMenu = false;
         }
 
         void StartExit(VehicleDoor door)
@@ -1392,8 +1689,8 @@ namespace WorkingVehicles
             carried.Clear();
             bodiesFixed.Clear();
             Vector3 rgt = Vector3.Cross(Vector3.up, fwd);
-            float middleLength = Cfg.Length.Value * 0.5f + Cfg.MarginObjects.Value;
-            float middleWidth = Cfg.Width.Value * 0.5f + Cfg.MarginObjects.Value;
+            float middleLength = Cfg.F(Cfg.Length, Cfg.CarLength) * 0.5f + Cfg.MarginObjects.Value;
+            float middleWidth = Cfg.F(Cfg.Width, Cfg.CarWidth) * 0.5f + Cfg.MarginObjects.Value;
 
             foreach (GearItem g in UnityEngine.Object.FindObjectsOfType<GearItem>())
                 if (g != null) TryCarry(g.transform, fwd, rgt, middleLength, middleWidth);
@@ -1452,9 +1749,9 @@ namespace WorkingVehicles
 
             bool withoutBat = current.Broken;
             bool on = current.isRunning && !withoutBat && !current.WithoutFuel;
-            float vmax = Cfg.VelMaxKmh.Value / 3.6f;
-            float vback = Cfg.VelBackKmh.Value / 3.6f;
-            bool blocksEntry = menuOpen || (current.dashboard != null && current.dashboard.inAdjust);
+            float vmax = Cfg.F(Cfg.VelMaxKmh, Cfg.CarVelMaxKmh) / 3.6f;
+            float vback = Cfg.F(Cfg.VelBackKmh, Cfg.CarVelBackKmh) / 3.6f;
+            bool blocksEntry = menuOpen || Radio.menu || (current.dashboard != null && current.dashboard.inAdjust);
             bool accel = !blocksEntry && on && Input.GetKey(Cfg.Key(Cfg.TAccelerate, KeyCode.W));
             bool brakes = !blocksEntry && Input.GetKey(Cfg.Key(Cfg.TBrake, KeyCode.S));
             bool hand = !blocksEntry && Input.GetKey(Cfg.Key(Cfg.TBrakeHand, KeyCode.Space));
@@ -1463,19 +1760,19 @@ namespace WorkingVehicles
             // ---- speed (progressive acceleration, braking, reversing, inertia). With the engine off there is only inertia and brakes.
             if (accel && !brakes)
             {
-                vel += (vel < 0f ? Cfg.Braking.Value : Cfg.Acceleration.Value) * dt;
+                vel += (vel < 0f ? Cfg.F(Cfg.Braking, Cfg.CarBraking) : Cfg.F(Cfg.Acceleration, Cfg.CarAcceleration)) * dt;
             }
             else if (brakes && !accel)
             {
-                if (vel > 0.3f) vel -= Cfg.Braking.Value * dt;
-                else if (on) vel -= Cfg.Acceleration.Value * 0.6f * dt;
-                else vel = Mathf.MoveTowards(vel, 0f, Cfg.Braking.Value * dt);
+                if (vel > 0.3f) vel -= Cfg.F(Cfg.Braking, Cfg.CarBraking) * dt;
+                else if (on) vel -= Cfg.F(Cfg.Acceleration, Cfg.CarAcceleration) * 0.6f * dt;
+                else vel = Mathf.MoveTowards(vel, 0f, Cfg.F(Cfg.Braking, Cfg.CarBraking) * dt);
             }
             else
             {
-                vel = Mathf.MoveTowards(vel, 0f, Cfg.Drag.Value * (on ? 1f : 2.5f) * dt);
+                vel = Mathf.MoveTowards(vel, 0f, Cfg.F(Cfg.Drag, Cfg.CarDrag) * (on ? 1f : 2.5f) * dt);
             }
-            if (hand) vel = Mathf.MoveTowards(vel, 0f, Cfg.BrakeHand.Value * dt);
+            if (hand) vel = Mathf.MoveTowards(vel, 0f, Cfg.F(Cfg.BrakeHand, Cfg.CarBrakeHand) * dt);
             vel = Mathf.Clamp(vel, -vback, vmax);
             if (withoutBat) vel = 0f;                      // without battery it doesn't move
             Consume(dt, on);
@@ -1485,7 +1782,7 @@ namespace WorkingVehicles
             // ---- steering wheel: follows the A/D keys. With the engine on and the vehicle moving it returns to center on its own;
             //      with the engine off it stays where you left it.
             float limit = Mathf.Max(Cfg.SteeringDegrees.Value, 1f);
-            float pace = limit / 0.7f * Settings.VelSteering();
+            float pace = limit / 0.7f * Settings.VelSteering(current.isCar);
             if (turn != 0f)
                 current.steering = Mathf.MoveTowards(current.steering, turn * limit, pace * dt);
             else if (on)
@@ -1497,7 +1794,7 @@ namespace WorkingVehicles
             // ---- steering: turns more the faster it goes, and little at low speed; reversed when backing up
             float factor = Mathf.Clamp01(Mathf.Abs(vel) / 3f) * Mathf.Sign(vel);
             float smoothing = Mathf.Lerp(1f, 0.45f, Mathf.Clamp01(Mathf.Abs(vel) / Mathf.Max(vmax, 1f)));
-            float dy = dirVol * Cfg.TurnMax.Value * factor * smoothing * dt;
+            float dy = dirVol * Cfg.F(Cfg.TurnMax, Cfg.CarTurnMax) * factor * smoothing * dt;
 
             accelCurrent = accel ? 1f : 0f;
             if (on) engine.Update(Mathf.Clamp01(Mathf.Abs(vel) / Mathf.Max(vmax, 1f)), accel ? 1f : 0f, dt);
@@ -1525,7 +1822,7 @@ namespace WorkingVehicles
             Quaternion rot = Quaternion.AngleAxis(dy, Vector3.up) * root.rotation;
 
             // ---- terrain: 4 points (like wheels) to adjust height and tilt
-            float L = Cfg.Length.Value * 0.4f, A = Cfg.Width.Value * 0.5f;
+            float L = Cfg.F(Cfg.Length, Cfg.CarLength) * 0.4f, A = Cfg.F(Cfg.Width, Cfg.CarWidth) * 0.5f;
             Vector3 rgt = Vector3.Cross(Vector3.up, newFwd);
             Vector3 pFD, pFI, pTD, pTI;
             bool ok = Ground(newPos + newFwd * L + rgt * A, pos.y, out pFD)
@@ -1599,7 +1896,7 @@ namespace WorkingVehicles
             Vector3 delta = dummyCam.position - before;
 
             // Camera adjustment inside the truck (Mod Options): the player is offset from the seat and turns with the truck.
-            Vector3 offM = current.isTruck ? OffsetWorld(Settings.Cam()) : Vector3.zero;
+            Vector3 offM = current.isTruck ? OffsetWorld(Settings.Cam(current.isCar)) : Vector3.zero;
             Vector3 move = delta + (offM - camApplied);
             camApplied = offM;
             if (move.sqrMagnitude > 0f)
@@ -1640,9 +1937,9 @@ namespace WorkingVehicles
 
         bool Blocked(Vector3 pos, Vector3 fwd, Vector3 dir, float dist)
         {
-            float height = Cfg.Height.Value;
+            float height = Cfg.F(Cfg.Height, Cfg.CarHeight);
             Vector3 center = pos + Vector3.up * (0.45f + height * 0.5f);
-            Vector3 half = new Vector3(Cfg.Width.Value * 0.5f, height * 0.5f, Cfg.Length.Value * 0.5f);
+            Vector3 half = new Vector3(Cfg.F(Cfg.Width, Cfg.CarWidth) * 0.5f, height * 0.5f, Cfg.F(Cfg.Length, Cfg.CarLength) * 0.5f);
             Quaternion orient = Quaternion.LookRotation(fwd, Vector3.up);
 
             RaycastHit[] hits = Physics.BoxCastAll(center, half, dir, orient, dist + 0.05f, ~0, QueryTriggerInteraction.Ignore);
